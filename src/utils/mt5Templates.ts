@@ -38,6 +38,30 @@ function mapAiProviderEnum(provider?: AiProviderMode): string {
       return 'AI_OPENROUTER_RESPAN';
     case 'OPENROUTER_RESPAN_PPLX':
       return 'AI_OPENROUTER_RESPAN_PPLX';
+    case 'OPENROUTER_LING':
+      return 'AI_OPENROUTER_LING';
+    case 'OPENROUTER_ERNIE':
+      return 'AI_OPENROUTER_ERNIE';
+    case 'OPENROUTER_LFM':
+      return 'AI_OPENROUTER_LFM';
+    case 'OPENROUTER_FLASH_TRIO':
+      return 'AI_OPENROUTER_FLASH_TRIO';
+    case 'OPENROUTER_GEMMA_PPLX_CONSENSUS':
+      return 'AI_OPENROUTER_GEMMA_PPLX_CONSENSUS';
+    case 'OPENROUTER_CLEF':
+      return 'AI_OPENROUTER_CLEF';
+    case 'OPENROUTER_PPLX_V12':
+      return 'AI_OPENROUTER_PPLX_V12';
+    case 'OPENROUTER_CLEF_PPLX12_CONSENSUS':
+      return 'AI_OPENROUTER_CLEF_PPLX12_CONSENSUS';
+    case 'OPENROUTER_LINGDT':
+      return 'AI_OPENROUTER_LINGDT';
+    case 'OPENROUTER_SPAN_PPLX_LINGDT_CONSENSUS':
+      return 'AI_OPENROUTER_SPAN_PPLX_LINGDT_CONSENSUS';
+    case 'OPENROUTER_GPT_OSS':
+      return 'AI_OPENROUTER_GPT_OSS';
+    case 'OPENROUTER_CLEF_PPLX12_GPTOSS_CONSENSUS':
+      return 'AI_OPENROUTER_CLEF_PPLX12_GPTOSS_CONSENSUS';
     case 'AIRFORCE':
       return 'AI_AIRFORCE';
     default:
@@ -47,6 +71,8 @@ function mapAiProviderEnum(provider?: AiProviderMode): string {
 
 function mapStrategyEnum(strategy?: EaConfig['strategyFocus']): string {
   switch (strategy) {
+    case 'UNIFIED_8IN1':
+      return 'STRAT_UNIFIED_8IN1';
     case 'SCALPING_EMA':
       return 'STRAT_SCALPING_EMA';
     case 'ULTRA_SCALP':
@@ -115,6 +141,8 @@ export function buildBridgeFiles(
   const sameSideMinConf = config?.sameSideMinConfidence ?? 80;
   const martingaleEnabled = config?.martingaleEnabled ?? true;
   const martingaleMult = (config?.martingaleMultiplier ?? 2.0).toFixed(2);
+  const mathRecoveryEnabled = config?.mathRecoveryEnabled ?? true;
+  const mathRecoveryMaxSteps = config?.mathRecoveryMaxSteps ?? 3;
 
   const mq5Content = `//+------------------------------------------------------------------+
 //|                                          AurumEA_XAUUSD_M5.mq5   |
@@ -160,7 +188,19 @@ enum ENUM_AI_PROVIDER
    AI_OPENROUTER_NEMOTRON = 11,// OpenRouter Chat: nvidia/nemotron-3-ultra-550b-a55b:free
    AI_OPENROUTER_KIMI = 12,    // OpenRouter Chat: moonshotai/kimi-k3.1-pro
    AI_OPENROUTER_RESPAN = 13,  // OpenRouter Decisions: respan/span-01-lite:free
-   AI_OPENROUTER_RESPAN_PPLX = 14 // OpenRouter Bergantian Cepat: Span-01-Lite <-> PPLX-Decider (Auto-Takeover)
+   AI_OPENROUTER_RESPAN_PPLX = 14, // OpenRouter Bergantian Cepat: Span-01-Lite <-> PPLX-Decider (Auto-Takeover)
+   AI_OPENROUTER_LING = 15,    // OpenRouter Chat: inclusionai/ling-3.2-flash:free
+   AI_OPENROUTER_ERNIE = 16,   // OpenRouter Chat: baidu/ernie-5.5-flash-preview:free
+   AI_OPENROUTER_LFM = 17,     // OpenRouter Chat: liquid/lfm-3-1.7b:free
+   AI_OPENROUTER_FLASH_TRIO = 18, // OpenRouter Kelompok Khusus: Ling-3.2 <-> Ernie-5.5 <-> LFM-3-1.7B (Auto-Takeover)
+   AI_OPENROUTER_GEMMA_PPLX_CONSENSUS = 19, // OpenRouter Dual Konsensus: Gemma-4-26B + PPLX-Decider (Wajib Sepakat)
+   AI_OPENROUTER_CLEF = 20,    // OpenRouter Decisions: cloudflare/clef-flash
+   AI_OPENROUTER_PPLX_V12 = 21,// OpenRouter Decisions: perplexity/pplx-decider-v1.2
+   AI_OPENROUTER_CLEF_PPLX12_CONSENSUS = 22, // OpenRouter Dual Konsensus: Clef-Flash + PPLX-Decider-v1.2 (Wajib Sepakat)
+   AI_OPENROUTER_LINGDT = 23, // OpenRouter Decisions: antdigital/lingdt-decision-fast-1.0:free
+   AI_OPENROUTER_SPAN_PPLX_LINGDT_CONSENSUS = 24, // OpenRouter Triple Konsensus 2/3: Span-01 + PPLX + LingDT
+   AI_OPENROUTER_GPT_OSS = 25, // OpenRouter Chat: openai/gpt-oss-20b
+   AI_OPENROUTER_CLEF_PPLX12_GPTOSS_CONSENSUS = 26 // OpenRouter Triple Konsensus 2/3: Clef + PPLX v1.2 + GPT-OSS-20B
 };
 
 enum ENUM_STRATEGY_FOCUS
@@ -169,7 +209,8 @@ enum ENUM_STRATEGY_FOCUS
    STRAT_ULTRA_SCALP = 1,      // Ultra-Scalping M1 + M5 (Sniper Micro Breakout)
    STRAT_LIQUIDITY_SMC = 2,    // Smart Money Concepts (Liquidity Sweep & BOS)
    STRAT_BALANCED = 3,         // Balanced Confluence (EMA + RSI + MACD + Price Action)
-   STRAT_ADAPTIVE_SCALP = 4    // Auto Adaptive AI: Momentum M5 + Sniper M1+M5 (Winrate >=90%)
+   STRAT_ADAPTIVE_SCALP = 4,   // Auto Adaptive AI: Momentum M5 + Sniper M1+M5 (Winrate >=90%)
+   STRAT_UNIFIED_8IN1 = 5      // Ultra-Scalp 11 Pilar Complete (Sync Ganda + Predatory Surveillance/Standby)
 };
 
 input group "=== 1. Koneksi Web Terminal & Mode Copy Trade ==="
@@ -210,6 +251,8 @@ input bool     InpAllowSameSideLayer = ${allowSameSideLayer ? 'true' : 'false'};
 input int      InpSameSideMinConf    = ${sameSideMinConf}; // Minimal keyakinan AI (%) untuk buka posisi searah / Martil
 input bool     InpMartingaleEnabled  = ${martingaleEnabled ? 'true' : 'false'}; // Aktifkan pengali lot Martil saat buka posisi searah
 input double   InpMartingaleMult     = ${martingaleMult}; // Pengali lot Martil untuk posisi ke-2 dst.
+input bool     InpMathRecovery       = ${mathRecoveryEnabled ? 'true' : 'false'}; // Matematikal Recovery 100% saat AI Invalid / Berbalik Arah
+input int      InpMaxRecoverySteps   = ${mathRecoveryMaxSteps}; // Maks level eskalasi Martil Recovery
 input int      InpMagicNumber        = 5052026;          // Magic Number EA
 
 input group "=== 5. Proteksi Profit Scalping (Bypass saat InpNoSlAiExit = true) ==="
@@ -249,6 +292,18 @@ string AiProviderToString(ENUM_AI_PROVIDER p)
       case AI_OPENROUTER_KIMI:        return "OPENROUTER_KIMI";
       case AI_OPENROUTER_RESPAN:      return "OPENROUTER_RESPAN";
       case AI_OPENROUTER_RESPAN_PPLX: return "OPENROUTER_RESPAN_PPLX";
+      case AI_OPENROUTER_LING:        return "OPENROUTER_LING";
+      case AI_OPENROUTER_ERNIE:       return "OPENROUTER_ERNIE";
+      case AI_OPENROUTER_LFM:         return "OPENROUTER_LFM";
+      case AI_OPENROUTER_FLASH_TRIO:  return "OPENROUTER_FLASH_TRIO";
+      case AI_OPENROUTER_GEMMA_PPLX_CONSENSUS: return "OPENROUTER_GEMMA_PPLX_CONSENSUS";
+      case AI_OPENROUTER_CLEF:        return "OPENROUTER_CLEF";
+      case AI_OPENROUTER_PPLX_V12:    return "OPENROUTER_PPLX_V12";
+      case AI_OPENROUTER_CLEF_PPLX12_CONSENSUS: return "OPENROUTER_CLEF_PPLX12_CONSENSUS";
+      case AI_OPENROUTER_LINGDT:      return "OPENROUTER_LINGDT";
+      case AI_OPENROUTER_SPAN_PPLX_LINGDT_CONSENSUS: return "OPENROUTER_SPAN_PPLX_LINGDT_CONSENSUS";
+      case AI_OPENROUTER_GPT_OSS:     return "OPENROUTER_GPT_OSS";
+      case AI_OPENROUTER_CLEF_PPLX12_GPTOSS_CONSENSUS: return "OPENROUTER_CLEF_PPLX12_GPTOSS_CONSENSUS";
       case AI_AIRFORCE:               return "AIRFORCE";
       default:                        return "AUTO";
    }
@@ -259,6 +314,7 @@ string StrategyFocusToString(ENUM_STRATEGY_FOCUS s)
 {
    switch(s)
    {
+      case STRAT_UNIFIED_8IN1:   return "UNIFIED_8IN1";
       case STRAT_SCALPING_EMA:   return "SCALPING_EMA";
       case STRAT_ULTRA_SCALP:    return "ULTRA_SCALP";
       case STRAT_LIQUIDITY_SMC:  return "LIQUIDITY_SMC";
@@ -817,6 +873,7 @@ string BuildRecentClosedTradesJson(int digits)
       long dealType = HistoryDealGetInteger(dealTicket, DEAL_TYPE);
       string posSide = (dealType == DEAL_TYPE_SELL) ? "BUY" : "SELL";
       double closePrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+      double dealLots   = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
       double pnl = HistoryDealGetDouble(dealTicket, DEAL_PROFIT)
                  + HistoryDealGetDouble(dealTicket, DEAL_SWAP)
                  + HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
@@ -832,8 +889,9 @@ string BuildRecentClosedTradesJson(int digits)
       int idx = ArraySize(entries);
       ArrayResize(entries, idx + 1);
       entries[idx] = StringFormat(
-         "{\\"side\\":\\"%s\\",\\"entryPrice\\":%.*f,\\"closePrice\\":%.*f,\\"takeProfit\\":%.*f,\\"pnlUsd\\":%.2f,\\"points\\":0,\\"closeReason\\":\\"%s\\",\\"closedMinutesAgo\\":%I64d}",
+         "{\\"side\\":\\"%s\\",\\"lots\\":%.2f,\\"entryPrice\\":%.*f,\\"closePrice\\":%.*f,\\"takeProfit\\":%.*f,\\"pnlUsd\\":%.2f,\\"points\\":0,\\"closeReason\\":\\"%s\\",\\"closedMinutesAgo\\":%I64d}",
          posSide,
+         dealLots,
          digits, closePrice,
          digits, closePrice,
          digits, closePrice,
@@ -896,8 +954,19 @@ string BuildMt5PayloadJson()
    }
    openDetailJson += "]";
 
+   string eaLotParamsJson = StringFormat(
+      "{\\"lotMode\\":\\"%s\\",\\"fixedLot\\":%.2f,\\"riskPercent\\":%.2f,\\"martingaleEnabled\\":%s,\\"martingaleMultiplier\\":%.2f,\\"mathRecoveryEnabled\\":%s,\\"mathRecoveryMaxSteps\\":%d}",
+      (InpUseRiskPercent ? "RISK_PERCENT" : "FIXED_LOT"),
+      InpFixedLot,
+      InpRiskPercent,
+      (InpMartingaleEnabled ? "true" : "false"),
+      InpMartingaleMult,
+      (InpMathRecovery ? "true" : "false"),
+      InpMaxRecoverySteps
+   );
+
    return StringFormat(
-      "{\\"strategyFocus\\":\\"%s\\",\\"aiProvider\\":\\"%s\\",\\"aiThinkingHigh\\":%s,\\"timeframe\\":\\"%s\\",\\"fullAiControl\\":%s,\\"noSlAiExit\\":%s,\\"riskPercent\\":%.2f,\\"accountBalance\\":%.2f,\\"openPositionsCount\\":%d,\\"openPositionsDetail\\":%s,\\"recentClosedTrades\\":%s,\\"mt5Symbol\\":\\"%s\\",\\"mt5Bid\\":%.*f,\\"mt5Ask\\":%.*f,\\"mt5SpreadPoints\\":%.1f,\\"mt5Candles\\":%s,\\"mt5M1Candles\\":%s}",
+      "{\\"strategyFocus\\":\\"%s\\",\\"aiProvider\\":\\"%s\\",\\"aiThinkingHigh\\":%s,\\"timeframe\\":\\"%s\\",\\"fullAiControl\\":%s,\\"noSlAiExit\\":%s,\\"riskPercent\\":%.2f,\\"accountBalance\\":%.2f,\\"eaLotParams\\":%s,\\"openPositionsCount\\":%d,\\"openPositionsDetail\\":%s,\\"recentClosedTrades\\":%s,\\"mt5Symbol\\":\\"%s\\",\\"mt5Bid\\":%.*f,\\"mt5Ask\\":%.*f,\\"mt5SpreadPoints\\":%.1f,\\"mt5Candles\\":%s,\\"mt5M1Candles\\":%s}",
       StrategyFocusToString(InpStrategyFocus),
       AiProviderToString(InpAiProvider),
       (InpAiThinkingHigh ? "true" : "false"),
@@ -906,6 +975,7 @@ string BuildMt5PayloadJson()
       (InpNoSlAiExit ? "true" : "false"),
       InpRiskPercent,
       AccountInfoDouble(ACCOUNT_BALANCE),
+      eaLotParamsJson,
       addedPos,
       openDetailJson,
       recentClosedJson,
@@ -1000,32 +1070,37 @@ void RunGeminiAnalysisAndTrade()
    string summary     = (count > 7) ? fields[7] : "";
    string posDecision = (count > 8) ? fields[8] : "NONE";
    string posReason   = (count > 9) ? fields[9] : "";
-   double highProbTp  = (count > 12) ? StringToDouble(fields[12]) : 0.0;
+   double highProbTp   = (count > 12) ? StringToDouble(fields[12]) : 0.0;
+   double recoveryLots = (count > 13) ? StringToDouble(fields[13]) : 0.0;
+   double recoveryTp   = (count > 14) ? StringToDouble(fields[14]) : 0.0;
 
-   PrintFormat("[AurumEA AI Judge (%s)] Vonis=%s | Conf=%d%% | PosDecision=%s | SLRef=%.2f | TP1=%.2f | HighProbTP=%.2f | %s",
-               AiProviderToString(InpAiProvider), signal, confidence, posDecision, sl, tp1, highProbTp, summary);
+   PrintFormat("[AurumEA AI Judge (%s)] Vonis=%s | Conf=%d%% | PosDecision=%s | SLRef=%.2f | TP1=%.2f | HighProbTP=%.2f | RecLot=%.2f | RecTP=%.2f | %s",
+               AiProviderToString(InpAiProvider), signal, confidence, posDecision, sl, tp1, highProbTp, recoveryLots, recoveryTp, summary);
 
+   bool closedInvalidByAi = false;
    if(InpNoSlAiExit && eaCount > 0)
    {
       if(posDecision == "CLOSE_ALL")
       {
          Print("[AurumEA AI Exit] Menutup SEMUA posisi: ", posReason);
          CloseEaPositionsBySide("ALL");
-         return;
+         closedInvalidByAi = true;
       }
-      if(posDecision == "CLOSE_BUY")
+      else if(posDecision == "CLOSE_BUY")
       {
          Print("[AurumEA AI Exit] Menutup posisi BUY: ", posReason);
          CloseEaPositionsBySide("BUY");
-         return;
+         closedInvalidByAi = true;
       }
-      if(posDecision == "CLOSE_SELL")
+      else if(posDecision == "CLOSE_SELL")
       {
          Print("[AurumEA AI Exit] Menutup posisi SELL: ", posReason);
          CloseEaPositionsBySide("SELL");
-         return;
+         closedInvalidByAi = true;
       }
    }
+
+   if(closedInvalidByAi && (!InpMathRecovery || signal == "HOLD")) return;
 
    if(signal == "HOLD") return;
    if(CountEaPositions() >= InpMaxPositions) return;
@@ -1100,13 +1175,25 @@ void RunGeminiAnalysisAndTrade()
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double execPrice = (signal == "BUY") ? ask : bid;
    double lots = CalculateLotSize(execPrice, sl);
-   if(sameSideCount > 0 && InpMartingaleEnabled && latestSameLot > 0)
+   bool isRecoveryOrder = false;
+   if(InpMathRecovery && sameSideCount == 0 && recoveryLots > 0.0 && recoveryTp > 0.0)
+   {
+      lots = NormalizeVolume(recoveryLots);
+      isRecoveryOrder = true;
+   }
+   else if(sameSideCount > 0 && InpMartingaleEnabled && latestSameLot > 0)
    {
       lots = NormalizeVolume(latestSameLot * MathMax(1.0, InpMartingaleMult));
    }
 
    double execTp = tp1;
-   if(sameSideCount > 0)
+   if(isRecoveryOrder)
+   {
+      execTp = NormalizeDouble(recoveryTp, digits);
+      if(signal == "BUY" && execTp < ask + minDist) execTp = NormalizeDouble(ask + minDist, digits);
+      if(signal == "SELL" && execTp > bid - minDist) execTp = NormalizeDouble(bid - minDist, digits);
+   }
+   else if(sameSideCount > 0)
    {
       if(highProbTp > 0) execTp = NormalizeDouble(highProbTp, digits);
       double combinedAvg = (existingSameWeightedSum + execPrice * lots) / (existingSameLots + lots);
@@ -1123,7 +1210,7 @@ void RunGeminiAnalysisAndTrade()
    }
 
    double execSl = InpNoSlAiExit ? 0.0 : sl;
-   string cmtPrefix = (sameSideCount > 0 && InpMartingaleEnabled) ? "Martil: " : "Scalp: ";
+   string cmtPrefix = isRecoveryOrder ? "Recovery100%: " : ((sameSideCount > 0 && InpMartingaleEnabled) ? "Martil: " : "Scalp: ");
 
    bool ok = false;
    if(signal == "BUY" && (InpNoSlAiExit || sl < execPrice) && execTp > execPrice)
@@ -1134,6 +1221,11 @@ void RunGeminiAnalysisAndTrade()
    if(ok)
    {
       g_lastTradeTime = TimeCurrent();
+      if(isRecoveryOrder)
+      {
+         PrintFormat("[AurumEA Mathematical Recovery 100%%] Eksekusi %s %.2f lot @ %.2f | TP Recovery=%.2f",
+                     signal, lots, execPrice, execTp);
+      }
       if(sameSideCount > 0)
       {
          ModifyPositionsTpBySide(signal, execTp, 0, execPrice, true);

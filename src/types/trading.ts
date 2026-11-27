@@ -17,6 +17,23 @@ export interface SupportResistanceLevel {
   label: string;
 }
 
+export interface HarmonicPatternSignal {
+  name: 'Gartley' | 'Bat' | 'Butterfly' | 'Crab' | 'Deep Crab' | 'Cypher' | 'AB=CD';
+  direction: 'BULLISH' | 'BEARISH';
+  status: 'AT_PRZ' | 'APPROACHING_PRZ' | 'COMPLETED';
+  xPrice: number;
+  aPrice: number;
+  bPrice: number;
+  cPrice: number;
+  dPrice: number;
+  przLow: number;
+  przHigh: number;
+  ratiosSummary: string;
+  target1: number;
+  target2: number;
+  invalidation: number;
+}
+
 export interface ChartStructureAnalysis {
   marketStructure: 'UPTREND_HH_HL' | 'DOWNTREND_LH_LL' | 'CONSOLIDATION' | 'TRANSITION_BOS';
   structureSummary: string;
@@ -31,6 +48,7 @@ export interface ChartStructureAnalysis {
   candlestickPatterns: string[];
   chartPatterns: string[];
   fvgZones: Array<{ type: 'BULLISH_FVG' | 'BEARISH_FVG'; low: number; high: number }>;
+  harmonicPattern?: HarmonicPatternSignal | null;
   pricePositionNote: string;
 }
 
@@ -259,6 +277,7 @@ export type PostTpDecision =
 
 export interface RecentClosedTradeContext {
   side: 'BUY' | 'SELL';
+  lots?: number;
   entryPrice: number;
   closePrice: number;
   takeProfit: number;
@@ -266,6 +285,27 @@ export interface RecentClosedTradeContext {
   points: number;
   closeReason: ClosedTrade['closeReason'];
   closedMinutesAgo: number;
+}
+
+export interface MathematicalRecoveryPlan {
+  isActive: boolean;
+  mode: 'EXECUTE_NOW' | 'ARMED_WAIT_SIGNAL';
+  triggeredBy: 'ACTIVE_INVALIDATED' | 'CLOSED_LOSS_STREAK' | 'BOTH';
+  direction: 'BUY' | 'SELL';
+  lossToRecoverUsd: number;
+  lossStreakCount: number;
+  baseLot: number;
+  lastLostLot: number;
+  martingaleEnabled: boolean;
+  martingaleMultiplier: number;
+  recoveryLots: number;
+  entryPrice: number;
+  breakevenPrice: number;
+  recoveryTp: number;
+  neededMoveUsd: number;
+  expectedNetProfitUsd: number;
+  achievableWithinAtr: boolean;
+  rationale: string;
 }
 
 export interface EaAnalysisResult {
@@ -300,10 +340,21 @@ export interface EaAnalysisResult {
   postTpEvaluation?: PostTpDecision;
   postTpReason?: string;
   keyLevelsSummary?: string;
+  priceActionSignal?: string;
+  harmonicPattern?: string;
+  lstmProbability?: {
+    upPct: number;
+    downPct: number;
+    holdPct: number;
+    horizonMinutes: number;
+    rationale: string;
+  };
   ocrExtractedPrice?: string;
   globalSyncSummary?: string;
+  fastBullPositionSummary?: string;
   macroSummary?: string;
   mtfSummary?: string;
+  recoveryPlan?: MathematicalRecoveryPlan;
   lockProfitPlan?: {
     lock25Price: number;
     lock50Price: number;
@@ -347,11 +398,20 @@ export interface ClosedTrade {
 export type AiProviderMode =
   | 'AUTO'
   | 'ROUND_ROBIN'
+  | 'OPENROUTER_GEMMA_PPLX_CONSENSUS'
+  | 'OPENROUTER_CLEF_PPLX12_CONSENSUS'
+  | 'OPENROUTER_CLEF_PPLX12_GPTOSS_CONSENSUS'
+  | 'OPENROUTER_SPAN_PPLX_LINGDT_CONSENSUS'
   | 'OPENROUTER_RESPAN_PPLX'
+  | 'OPENROUTER_FLASH_TRIO'
   | 'GEMINI'
   | 'AIRFORCE'
   | 'OPENROUTER'
   | 'OPENROUTER_RESPAN'
+  | 'OPENROUTER_CLEF'
+  | 'OPENROUTER_PPLX_V12'
+  | 'OPENROUTER_LINGDT'
+  | 'OPENROUTER_GPT_OSS'
   | 'OPENROUTER_HEYGEN'
   | 'OPENROUTER_DREX'
   | 'OPENROUTER_JEV'
@@ -359,7 +419,10 @@ export type AiProviderMode =
   | 'OPENROUTER_ARGON'
   | 'OPENROUTER_HYDROGEN'
   | 'OPENROUTER_NEMOTRON'
-  | 'OPENROUTER_KIMI';
+  | 'OPENROUTER_KIMI'
+  | 'OPENROUTER_LING'
+  | 'OPENROUTER_ERNIE'
+  | 'OPENROUTER_LFM';
 
 export const AI_PROVIDER_OPTIONS: Array<{
   id: AiProviderMode;
@@ -377,9 +440,34 @@ export const AI_PROVIDER_OPTIONS: Array<{
     label: 'Bergantian Merata (Gemini 4 ↔ Airforce ↔ OpenRouter Pool)',
   },
   {
+    id: 'OPENROUTER_GEMMA_PPLX_CONSENSUS',
+    shortLabel: 'OR Konsensus (Gemma + PPLX)',
+    label: 'OR Dual Konsensus: Gemma-4-26B + PPLX-Decider (Wajib Sepakat Searah, Jika Beda/Netral → HOLD)',
+  },
+  {
+    id: 'OPENROUTER_CLEF_PPLX12_CONSENSUS',
+    shortLabel: 'OR Konsensus (Clef + PPLX v1.2)',
+    label: 'OR Dual Konsensus: Clef-Flash + PPLX-Decider-v1.2 (Wajib Sepakat Searah, Jika Beda/Netral → HOLD)',
+  },
+  {
+    id: 'OPENROUTER_CLEF_PPLX12_GPTOSS_CONSENSUS',
+    shortLabel: 'OR Konsensus 2/3 (Clef + PPLX v1.2 + GPT-OSS-20B)',
+    label: 'OR Triple Konsensus 2/3: Clef-Flash + PPLX-Decider-v1.2 + GPT-OSS-20B (Wajib ≥2/3 Sepakat Searah, Jika <2/Netral → HOLD)',
+  },
+  {
     id: 'OPENROUTER_RESPAN_PPLX',
     shortLabel: 'OR Dual (Span-01 ↔ PPLX)',
     label: 'OR Bergantian Cepat: Span-01-Lite ↔ PPLX-Decider (Auto-Takeover jika lambat)',
+  },
+  {
+    id: 'OPENROUTER_SPAN_PPLX_LINGDT_CONSENSUS',
+    shortLabel: 'OR Konsensus 2/3 (Span-01 + PPLX + LingDT)',
+    label: 'OR Triple Konsensus 2/3: Span-01-Lite + PPLX-Decider + LingDT-Fast (Wajib ≥2/3 Sepakat Searah, Jika <2/Netral → HOLD)',
+  },
+  {
+    id: 'OPENROUTER_FLASH_TRIO',
+    shortLabel: 'OR Trio (Ling ↔ Ernie ↔ LFM)',
+    label: 'OR Kelompok Khusus: Ling-3.2 ↔ Ernie-5.5 ↔ LFM-3-1.7B (Bergantian & Auto-Takeover)',
   },
   {
     id: 'GEMINI',
@@ -389,7 +477,22 @@ export const AI_PROVIDER_OPTIONS: Array<{
   {
     id: 'OPENROUTER',
     shortLabel: 'OpenRouter (All Pool)',
-    label: 'OpenRouter Pool (Span-01 / PPLX / Heygen / Drex-Max / Jev-1.14 / Argon / Hydrogen / Nemotron / Kimi)',
+    label: 'OpenRouter Pool (Clef-Flash / PPLX-v1.2 / GPT-OSS-20B / Span-01 / PPLX / LingDT / Ling / Ernie / LFM / Heygen / Drex-Max / Jev-1.14 / Argon / Hydrogen / Nemotron / Kimi)',
+  },
+  {
+    id: 'OPENROUTER_CLEF',
+    shortLabel: 'OR (clef-flash)',
+    label: 'OpenRouter Alpha Decisions: cloudflare/clef-flash',
+  },
+  {
+    id: 'OPENROUTER_PPLX_V12',
+    shortLabel: 'OR (pplx-decider-v1.2)',
+    label: 'OpenRouter Alpha Decisions: perplexity/pplx-decider-v1.2',
+  },
+  {
+    id: 'OPENROUTER_GPT_OSS',
+    shortLabel: 'OR (gpt-oss-20b)',
+    label: 'OpenRouter Chat: openai/gpt-oss-20b',
   },
   {
     id: 'OPENROUTER_RESPAN',
@@ -400,6 +503,26 @@ export const AI_PROVIDER_OPTIONS: Array<{
     id: 'OPENROUTER_PPLX',
     shortLabel: 'OR (pplx-decider-flash)',
     label: 'OpenRouter Alpha Decisions: perplexity/pplx-decider-flash-v1.3:free',
+  },
+  {
+    id: 'OPENROUTER_LINGDT',
+    shortLabel: 'OR (lingdt-decision-fast)',
+    label: 'OpenRouter Alpha Decisions: antdigital/lingdt-decision-fast-1.0:free',
+  },
+  {
+    id: 'OPENROUTER_LING',
+    shortLabel: 'OR (ling-3.2-flash)',
+    label: 'OpenRouter Chat: inclusionai/ling-3.2-flash:free',
+  },
+  {
+    id: 'OPENROUTER_ERNIE',
+    shortLabel: 'OR (ernie-5.5-flash)',
+    label: 'OpenRouter Chat: baidu/ernie-5.5-flash-preview:free',
+  },
+  {
+    id: 'OPENROUTER_LFM',
+    shortLabel: 'OR (lfm-3-1.7b)',
+    label: 'OpenRouter Chat: liquid/lfm-3-1.7b:free',
   },
   {
     id: 'OPENROUTER_HEYGEN',
@@ -463,9 +586,17 @@ export interface EaConfig {
   sameSideMinConfidence?: number;
   martingaleEnabled?: boolean;
   martingaleMultiplier?: number;
+  mathRecoveryEnabled?: boolean;
+  mathRecoveryMaxSteps?: number;
   aiProvider?: AiProviderMode;
   aiThinkingHigh?: boolean;
-  strategyFocus: 'ADAPTIVE_SCALP' | 'BALANCED' | 'SCALPING_EMA' | 'ULTRA_SCALP' | 'LIQUIDITY_SMC';
+  strategyFocus:
+    | 'UNIFIED_8IN1'
+    | 'ADAPTIVE_SCALP'
+    | 'BALANCED'
+    | 'SCALPING_EMA'
+    | 'ULTRA_SCALP'
+    | 'LIQUIDITY_SMC';
   brokerFeed?: BrokerFeedId;
   initialBalance: number;
 }

@@ -1,7 +1,9 @@
 import type {
   Candle,
   ChartStructureAnalysis,
+  HarmonicPatternSignal,
   IndicatorSnapshot,
+  MathematicalRecoveryPlan,
   SupportResistanceLevel,
 } from '../types/trading.ts';
 
@@ -190,6 +192,7 @@ export function analyzeChartStructure(
       candlestickPatterns: [],
       chartPatterns: [],
       fvgZones: [],
+      harmonicPattern: null,
       pricePositionNote: 'Menunggu akumulasi candle.',
     };
   }
@@ -555,6 +558,255 @@ export function analyzeChartStructure(
     : 'Tidak ada S terdekat';
   const pricePositionNote = `${resNote} | ${supNote}`;
 
+  const detectHarmonicPattern = (): HarmonicPatternSignal | null => {
+    // Build strictly alternating pivots (HIGH <-> LOW) from fractal swings
+    const rawAlternating: RawPivot[] = [...swingHighs, ...swingLows].sort((a, b) => a.idx - b.idx);
+    const pivots: RawPivot[] = [];
+    for (const p of rawAlternating) {
+      if (pivots.length === 0) {
+        pivots.push({ ...p });
+        continue;
+      }
+      const top = pivots[pivots.length - 1];
+      if (top.kind === p.kind) {
+        if ((p.kind === 'HIGH' && p.price > top.price) || (p.kind === 'LOW' && p.price < top.price)) {
+          pivots[pivots.length - 1] = { ...p };
+        }
+      } else {
+        if (Math.abs(p.price - top.price) >= safeAtr * 0.45) {
+          pivots.push({ ...p });
+        }
+      }
+    }
+
+    if (pivots.length < 4) return null;
+
+    // Candidate sets: either last 5 confirmed pivots [X,A,B,C,D] (if D is recent)
+    // or last 4 confirmed pivots [X,A,B,C] + current live swing extreme D
+    const candidateSets: Array<{
+      x: number;
+      a: number;
+      b: number;
+      c: number;
+      d: number;
+      dBarDist: number;
+    }> = [];
+
+    if (pivots.length >= 5) {
+      const p5 = pivots.slice(-5);
+      candidateSets.push({
+        x: p5[0].price,
+        a: p5[1].price,
+        b: p5[2].price,
+        c: p5[3].price,
+        d: p5[4].price,
+        dBarDist: n - 1 - p5[4].idx,
+      });
+    }
+
+    const p4 = pivots.slice(-4);
+    const lastC = p4[3];
+    const tailSlice = candles.slice(Math.max(lastC.idx + 1, n - 12));
+    if (tailSlice.length >= 1) {
+      const dLive =
+        lastC.kind === 'HIGH'
+          ? Math.min(...tailSlice.map((c) => c.low))
+          : Math.max(...tailSlice.map((c) => c.high));
+      if (Math.abs(lastC.price - dLive) >= safeAtr * 0.4) {
+        candidateSets.push({
+          x: p4[0].price,
+          a: p4[1].price,
+          b: p4[2].price,
+          c: p4[3].price,
+          d: dLive,
+          dBarDist: 0,
+        });
+      }
+    }
+
+    let bestMatch: { score: number; signal: HarmonicPatternSignal } | null = null;
+    const inRange = (val: number, min: number, max: number) => val >= min && val <= max;
+
+    for (const s of candidateSets) {
+      const isBullish = s.x < s.a && s.a > s.b && s.b < s.c && s.d < s.c;
+      const isBearish = s.x > s.a && s.a < s.b && s.b > s.c && s.d > s.c;
+      if (!isBullish && !isBearish) continue;
+
+      const xa = Math.abs(s.a - s.x);
+      const ab = Math.abs(s.b - s.a);
+      const bc = Math.abs(s.c - s.b);
+      const cd = Math.abs(s.d - s.c);
+      const ad = Math.abs(s.d - s.a);
+      const xc = Math.abs(s.c - s.x);
+      if (xa < safeAtr * 0.8 || ab < safeAtr * 0.4 || bc < safeAtr * 0.35 || cd < safeAtr * 0.35) {
+        continue;
+      }
+
+      const abXa = ab / xa;
+      const bcAb = bc / ab;
+      const adXa = ad / xa;
+      const cdBc = cd / bc;
+      const cdAb = cd / ab;
+      const bcXa = bc / xa;
+      const cdXc = xc > 0.05 ? cd / xc : 0;
+
+      type PatDef = {
+        name: HarmonicPatternSignal['name'];
+        idealAdXa: number;
+        idealCdXc?: number;
+        match: boolean;
+        err: number;
+      };
+
+      const defs: PatDef[] = [
+        {
+          name: 'Gartley',
+          idealAdXa: 0.786,
+          match:
+            inRange(abXa, 0.52, 0.71) &&
+            inRange(bcAb, 0.36, 0.92) &&
+            inRange(adXa, 0.71, 0.86) &&
+            inRange(cdBc, 1.12, 1.75),
+          err: Math.abs(abXa - 0.618) + Math.abs(adXa - 0.786),
+        },
+        {
+          name: 'Bat',
+          idealAdXa: 0.886,
+          match:
+            inRange(abXa, 0.35, 0.56) &&
+            inRange(bcAb, 0.36, 0.92) &&
+            inRange(adXa, 0.82, 0.95) &&
+            inRange(cdBc, 1.45, 2.75),
+          err: Math.abs(abXa - 0.44) + Math.abs(adXa - 0.886),
+        },
+        {
+          name: 'Butterfly',
+          idealAdXa: 1.272,
+          match:
+            inRange(abXa, 0.7, 0.86) &&
+            inRange(bcAb, 0.36, 0.92) &&
+            inRange(adXa, 1.18, 1.65) &&
+            inRange(cdBc, 1.45, 2.75),
+          err: Math.abs(abXa - 0.786) + Math.abs(adXa - 1.272),
+        },
+        {
+          name: 'Crab',
+          idealAdXa: 1.618,
+          match:
+            inRange(abXa, 0.35, 0.66) &&
+            inRange(bcAb, 0.36, 0.92) &&
+            inRange(adXa, 1.48, 1.75) &&
+            inRange(cdBc, 2.0, 3.8),
+          err: Math.abs(abXa - 0.5) + Math.abs(adXa - 1.618),
+        },
+        {
+          name: 'Deep Crab',
+          idealAdXa: 1.618,
+          match:
+            inRange(abXa, 0.82, 0.93) &&
+            inRange(bcAb, 0.36, 0.92) &&
+            inRange(adXa, 1.48, 1.75) &&
+            inRange(cdBc, 1.85, 3.8),
+          err: Math.abs(abXa - 0.886) + Math.abs(adXa - 1.618),
+        },
+        {
+          name: 'Cypher',
+          idealAdXa: 0.786,
+          idealCdXc: 0.786,
+          match:
+            inRange(abXa, 0.36, 0.66) &&
+            inRange(bcXa, 1.08, 1.48) &&
+            inRange(cdXc, 0.72, 0.86),
+          err: Math.abs(abXa - 0.5) + Math.abs(cdXc - 0.786),
+        },
+        {
+          name: 'AB=CD',
+          idealAdXa: adXa,
+          match: inRange(bcAb, 0.38, 0.88) && inRange(cdAb, 0.88, 1.32),
+          err: Math.abs(cdAb - 1.0) + 0.15,
+        },
+      ];
+
+      const matched = defs.filter((d) => d.match).sort((a, b) => a.err - b.err)[0];
+      if (!matched) continue;
+
+      const direction: HarmonicPatternSignal['direction'] = isBullish ? 'BULLISH' : 'BEARISH';
+      let idealD = s.d;
+      if (matched.name === 'AB=CD') {
+        idealD = isBullish ? s.c - ab : s.c + ab;
+      } else if (matched.name === 'Cypher' && matched.idealCdXc) {
+        idealD = isBullish ? s.c - xc * matched.idealCdXc : s.c + xc * matched.idealCdXc;
+      } else {
+        idealD = isBullish ? s.a - xa * matched.idealAdXa : s.a + xa * matched.idealAdXa;
+      }
+
+      const przPad = Math.max(0.45, safeAtr * 0.38);
+      const przLow = Number((Math.min(idealD, s.d) - przPad * 0.5).toFixed(2));
+      const przHigh = Number((Math.max(idealD, s.d) + przPad * 0.5).toFixed(2));
+      const distToPrz =
+        currentPrice < przLow
+          ? przLow - currentPrice
+          : currentPrice > przHigh
+          ? currentPrice - przHigh
+          : 0;
+
+      let status: HarmonicPatternSignal['status'] = 'COMPLETED';
+      if (distToPrz <= safeAtr * 0.35 && s.dBarDist <= 5) {
+        status = 'AT_PRZ';
+      } else if (distToPrz <= safeAtr * 1.25 && s.dBarDist <= 8) {
+        status = 'APPROACHING_PRZ';
+      } else if (s.dBarDist > 10) {
+        continue;
+      }
+
+      const target1 = Number(
+        (isBullish ? s.d + ad * 0.382 : s.d - ad * 0.382).toFixed(2)
+      );
+      const target2 = Number(
+        (isBullish ? s.d + ad * 0.618 : s.d - ad * 0.618).toFixed(2)
+      );
+      const invalidation = Number(
+        (
+          isBullish
+            ? Math.min(s.x, s.d) - safeAtr * 0.45
+            : Math.max(s.x, s.d) + safeAtr * 0.45
+        ).toFixed(2)
+      );
+
+      const score = (status === 'AT_PRZ' ? 2 : status === 'APPROACHING_PRZ' ? 1 : 0.5) - matched.err;
+      if (!bestMatch || score > bestMatch.score) {
+        bestMatch = {
+          score,
+          signal: {
+            name: matched.name,
+            direction,
+            status,
+            xPrice: Number(s.x.toFixed(2)),
+            aPrice: Number(s.a.toFixed(2)),
+            bPrice: Number(s.b.toFixed(2)),
+            cPrice: Number(s.c.toFixed(2)),
+            dPrice: Number(s.d.toFixed(2)),
+            przLow,
+            przHigh,
+            ratiosSummary: `AB/XA=${abXa.toFixed(3)}, BC/AB=${bcAb.toFixed(3)}, AD/XA=${adXa.toFixed(3)}`,
+            target1,
+            target2,
+            invalidation,
+          },
+        };
+      }
+    }
+
+    return bestMatch ? bestMatch.signal : null;
+  };
+
+  const harmonicPattern = detectHarmonicPattern();
+  if (harmonicPattern && (harmonicPattern.status === 'AT_PRZ' || harmonicPattern.status === 'APPROACHING_PRZ')) {
+    chartPatterns.unshift(
+      `${harmonicPattern.direction} Harmonic ${harmonicPattern.name} (${harmonicPattern.status} PRZ ${harmonicPattern.przLow.toFixed(2)}-${harmonicPattern.przHigh.toFixed(2)})`
+    );
+  }
+
   return {
     marketStructure,
     structureSummary,
@@ -569,6 +821,7 @@ export function analyzeChartStructure(
     candlestickPatterns: candlestickPatterns.slice(0, 4),
     chartPatterns: chartPatterns.slice(0, 4),
     fvgZones: fvgZones.slice(-3),
+    harmonicPattern,
     pricePositionNote,
   };
 }
@@ -805,4 +1058,225 @@ export function calculateXauPnl(
 ): number {
   const diff = side === 'BUY' ? currentPrice - entryPrice : entryPrice - currentPrice;
   return Number((diff * lots * 100).toFixed(2));
+}
+
+export interface ComputeRecoveryInput {
+  enabled?: boolean;
+  accountBalance: number;
+  lotMode?: 'RISK_PERCENT' | 'FIXED_LOT';
+  fixedLot?: number;
+  riskPercent?: number;
+  martingaleEnabled?: boolean;
+  martingaleMultiplier?: number;
+  maxRecoverySteps?: number;
+  bid: number;
+  ask: number;
+  atr: number;
+  nearestSupport?: number | null;
+  nearestResistance?: number | null;
+  openPositions: Array<{
+    side: 'BUY' | 'SELL';
+    lots: number;
+    entryPrice: number;
+    floatingPnlUsd: number;
+  }>;
+  positionDecision: 'NONE' | 'KEEP' | 'CLOSE_BUY' | 'CLOSE_SELL' | 'CLOSE_ALL';
+  reversalConfidence?: number;
+  recentClosedTrades: Array<{
+    side: 'BUY' | 'SELL';
+    lots?: number;
+    pnlUsd: number;
+    closeReason?: string;
+    closedMinutesAgo?: number;
+  }>;
+  aiSignal: 'BUY' | 'SELL' | 'HOLD';
+  marketBias: 'BULLISH' | 'BEARISH' | 'RANGING';
+}
+
+export function computeMathematicalRecoveryPlan(
+  input: ComputeRecoveryInput
+): MathematicalRecoveryPlan | undefined {
+  if (input.enabled === false) return undefined;
+
+  const isInvalidatedClose =
+    input.openPositions.length > 0 &&
+    (input.positionDecision === 'CLOSE_ALL' ||
+      input.positionDecision === 'CLOSE_BUY' ||
+      input.positionDecision === 'CLOSE_SELL');
+
+  const invalidatedPositions = isInvalidatedClose
+    ? input.openPositions.filter((p) =>
+        input.positionDecision === 'CLOSE_ALL'
+          ? true
+          : input.positionDecision === 'CLOSE_BUY'
+          ? p.side === 'BUY'
+          : p.side === 'SELL'
+      )
+    : [];
+
+  const invalidatedFloatingPnl = invalidatedPositions.reduce(
+    (s, p) => s + (Number(p.floatingPnlUsd) || 0),
+    0
+  );
+  const invalidatedLossUsd =
+    invalidatedFloatingPnl < 0 ? Math.abs(invalidatedFloatingPnl) : 0;
+
+  // Sum trailing consecutive losing trades from newest backward until a profitable trade resets the streak
+  let closedStreakLossUsd = 0;
+  let closedStreakCount = 0;
+  let lastClosedLostLot = 0;
+  for (const t of input.recentClosedTrades) {
+    const pnl = Number(t.pnlUsd);
+    if (!Number.isFinite(pnl)) continue;
+    if (pnl >= 0) break;
+    closedStreakLossUsd += Math.abs(pnl);
+    closedStreakCount += 1;
+    if (lastClosedLostLot === 0 && Number(t.lots) > 0) {
+      lastClosedLostLot = Number(t.lots);
+    }
+  }
+
+  const totalLossToRecoverUsd = Number((closedStreakLossUsd + invalidatedLossUsd).toFixed(2));
+  const lossStreakCount =
+    closedStreakCount + (invalidatedPositions.length > 0 && invalidatedLossUsd > 0 ? 1 : 0);
+
+  if (totalLossToRecoverUsd <= 0 && invalidatedPositions.length === 0) {
+    return undefined;
+  }
+
+  const safeAtr = Math.max(0.5, Number(input.atr) || 2.5);
+  const lotMode = input.lotMode ?? 'RISK_PERCENT';
+  const configuredFixed = Math.max(0.01, Math.min(20, Number(input.fixedLot) || 0.05));
+  const configuredRiskPct = Math.max(0.1, Math.min(10, Number(input.riskPercent) || 1.0));
+  const martilOn = input.martingaleEnabled ?? true;
+  const mult = Math.max(1.0, Math.min(5.0, Number(input.martingaleMultiplier) || 2.0));
+  const maxSteps = Math.max(1, Math.min(5, Math.round(Number(input.maxRecoverySteps) || 3)));
+
+  // Determine recovery direction
+  let direction: 'BUY' | 'SELL' = 'BUY';
+  if (input.aiSignal === 'BUY' || input.aiSignal === 'SELL') {
+    direction = input.aiSignal;
+  } else if (invalidatedPositions.length > 0) {
+    direction = invalidatedPositions[0].side === 'BUY' ? 'SELL' : 'BUY';
+  } else if (input.marketBias === 'BEARISH') {
+    direction = 'SELL';
+  } else if (input.marketBias === 'BULLISH') {
+    direction = 'BUY';
+  } else if (input.recentClosedTrades[0]) {
+    direction = input.recentClosedTrades[0].side === 'BUY' ? 'SELL' : 'BUY';
+  }
+
+  const entryPrice = Number((direction === 'BUY' ? input.ask : input.bid).toFixed(2));
+  const refSl =
+    direction === 'BUY' ? entryPrice - safeAtr * 0.95 : entryPrice + safeAtr * 0.95;
+  const baseLot =
+    lotMode === 'FIXED_LOT'
+      ? configuredFixed
+      : calculateXauLotSize(Math.max(100, input.accountBalance), configuredRiskPct, entryPrice, refSl);
+
+  const invalidatedMaxLot =
+    invalidatedPositions.length > 0
+      ? Math.max(...invalidatedPositions.map((p) => Math.max(0.01, Number(p.lots) || 0.01)))
+      : 0;
+  const lastLostLot =
+    invalidatedMaxLot > 0
+      ? invalidatedMaxLot
+      : lastClosedLostLot > 0
+      ? lastClosedLostLot
+      : baseLot;
+
+  const effectiveStep = Math.min(Math.max(1, lossStreakCount), maxSteps);
+  const maxAllowedMartilLot = Number(
+    Math.min(20, baseLot * Math.pow(mult, maxSteps)).toFixed(2)
+  );
+  const rawMartilLot = martilOn
+    ? lastLostLot > 0
+      ? lastLostLot * mult
+      : baseLot * Math.pow(mult, effectiveStep)
+    : baseLot;
+
+  const recoveryLots = Number(
+    Math.max(0.01, Math.min(20, maxAllowedMartilLot, rawMartilLot)).toFixed(2)
+  );
+
+  // Exact USD move required for 100% loss recovery + positive net buffer
+  // On XAUUSD: 1.00 lot * $1.00 move = $100 PnL
+  const beMoveUsd =
+    totalLossToRecoverUsd > 0 ? totalLossToRecoverUsd / (recoveryLots * 100) : 0;
+  const profitBufferUsd = Math.max(0.5, recoveryLots * 100 * 0.35);
+  const rawNeededMove =
+    (totalLossToRecoverUsd + profitBufferUsd) / (recoveryLots * 100);
+  const minScalpMove = Math.max(0.45, safeAtr * 0.32);
+  const neededMoveUsd = Number(Math.max(minScalpMove, rawNeededMove).toFixed(2));
+
+  const breakevenPrice = Number(
+    (direction === 'BUY' ? entryPrice + beMoveUsd : entryPrice - beMoveUsd).toFixed(2)
+  );
+  const recoveryTp = Number(
+    (direction === 'BUY' ? entryPrice + neededMoveUsd : entryPrice - neededMoveUsd).toFixed(2)
+  );
+  const expectedGrossUsd = neededMoveUsd * recoveryLots * 100;
+  const expectedNetProfitUsd = Number((expectedGrossUsd - totalLossToRecoverUsd).toFixed(2));
+
+  const srRoomUsd =
+    direction === 'BUY'
+      ? input.nearestResistance && input.nearestResistance > entryPrice
+        ? input.nearestResistance - entryPrice
+        : Infinity
+      : input.nearestSupport && input.nearestSupport < entryPrice
+      ? entryPrice - input.nearestSupport
+      : Infinity;
+
+  const achievableWithinAtr =
+    neededMoveUsd <= Math.max(safeAtr * 1.9, 3.2) && neededMoveUsd <= srRoomUsd * 1.08;
+
+  const triggeredBy: MathematicalRecoveryPlan['triggeredBy'] =
+    invalidatedPositions.length > 0 && closedStreakCount > 0
+      ? 'BOTH'
+      : invalidatedPositions.length > 0
+      ? 'ACTIVE_INVALIDATED'
+      : 'CLOSED_LOSS_STREAK';
+
+  const mode: MathematicalRecoveryPlan['mode'] =
+    input.aiSignal === 'BUY' || input.aiSignal === 'SELL'
+      ? 'EXECUTE_NOW'
+      : 'ARMED_WAIT_SIGNAL';
+
+  const rationale =
+    mode === 'EXECUTE_NOW'
+      ? `AI mengonfirmasi pembalikan ${direction}: buka Martil ${recoveryLots.toFixed(
+          2
+        )} lot (Base ${baseLot.toFixed(2)} / Prev ${lastLostLot.toFixed(2)} × ${
+          martilOn ? `${mult.toFixed(1)}x` : '1.0x'
+        }) @ ${entryPrice.toFixed(2)} dengan TP Matematis ${recoveryTp.toFixed(
+          2
+        )} (+$${neededMoveUsd.toFixed(2)}/oz) untuk pulih 100% loss -$${totalLossToRecoverUsd.toFixed(
+          2
+        )} + net +$${expectedNetProfitUsd.toFixed(2)}.`
+      : `Recovery 100% SIAGA (loss -$${totalLossToRecoverUsd.toFixed(
+          2
+        )}): siapkan Martil ${recoveryLots.toFixed(2)} lot arah ${direction} (BE ${breakevenPrice.toFixed(
+          2
+        )} · TP Pulih ${recoveryTp.toFixed(2)}) begitu sinyal konfirmasi keluar.`;
+
+  return {
+    isActive: true,
+    mode,
+    triggeredBy,
+    direction,
+    lossToRecoverUsd: totalLossToRecoverUsd,
+    lossStreakCount: Math.max(1, lossStreakCount),
+    baseLot: Number(baseLot.toFixed(2)),
+    lastLostLot: Number(lastLostLot.toFixed(2)),
+    martingaleEnabled: martilOn,
+    martingaleMultiplier: mult,
+    recoveryLots,
+    entryPrice,
+    breakevenPrice,
+    recoveryTp,
+    neededMoveUsd,
+    expectedNetProfitUsd,
+    achievableWithinAtr,
+    rationale,
+  };
 }

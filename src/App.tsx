@@ -16,6 +16,7 @@ import { RiskToastStack } from './components/RiskToastStack.tsx';
 import {
   TIMEFRAME_META,
   getTimeframeForCadence,
+  type AiProviderMode,
   type BrokerFeedId,
   type ClosedTrade,
   type EaAnalysisResult,
@@ -57,9 +58,11 @@ const DEFAULT_CONFIG: EaConfig = {
   sameSideMinConfidence: 80,
   martingaleEnabled: true,
   martingaleMultiplier: 2.0,
+  mathRecoveryEnabled: true,
+  mathRecoveryMaxSteps: 3,
   aiProvider: 'AUTO',
   aiThinkingHigh: true,
-  strategyFocus: 'ADAPTIVE_SCALP',
+  strategyFocus: 'UNIFIED_8IN1',
   brokerFeed: 'PEPPERSTONE',
   initialBalance: 10000,
 };
@@ -98,8 +101,17 @@ export default function App() {
       'GEMINI',
       'AIRFORCE',
       'OPENROUTER',
+      'OPENROUTER_GEMMA_PPLX_CONSENSUS',
+      'OPENROUTER_CLEF_PPLX12_CONSENSUS',
+      'OPENROUTER_CLEF_PPLX12_GPTOSS_CONSENSUS',
+      'OPENROUTER_SPAN_PPLX_LINGDT_CONSENSUS',
       'OPENROUTER_RESPAN',
       'OPENROUTER_RESPAN_PPLX',
+      'OPENROUTER_FLASH_TRIO',
+      'OPENROUTER_CLEF',
+      'OPENROUTER_PPLX_V12',
+      'OPENROUTER_LINGDT',
+      'OPENROUTER_GPT_OSS',
       'OPENROUTER_HEYGEN',
       'OPENROUTER_DREX',
       'OPENROUTER_JEV',
@@ -108,9 +120,18 @@ export default function App() {
       'OPENROUTER_HYDROGEN',
       'OPENROUTER_NEMOTRON',
       'OPENROUTER_KIMI',
+      'OPENROUTER_LING',
+      'OPENROUTER_ERNIE',
+      'OPENROUTER_LFM',
     ]);
+    const migratedProvider =
+      (stored.aiProvider as string) === 'OPENROUTER_ERNIE_PPLX_CONSENSUS'
+        ? 'OPENROUTER_GEMMA_PPLX_CONSENSUS'
+        : stored.aiProvider;
     const normalizedProvider =
-      stored.aiProvider && validModes.has(stored.aiProvider) ? stored.aiProvider : 'AUTO';
+      migratedProvider && validModes.has(migratedProvider)
+        ? (migratedProvider as AiProviderMode)
+        : 'AUTO';
     return {
       ...DEFAULT_CONFIG,
       ...stored,
@@ -586,6 +607,8 @@ export default function App() {
       stopLoss: number;
       takeProfit: number;
       overrideTp?: number;
+      overrideLots?: number;
+      isRecoveryOrder?: boolean;
       source: OpenPosition['source'];
       confidence?: number;
       setupPattern?: string;
@@ -606,15 +629,19 @@ export default function App() {
 
       const sameSidePositions = activePositionsRef.current.filter((p) => p.side === params.side);
       const isLayering = sameSidePositions.length > 0;
-      const isMartil = isLayering && (cfg.martingaleEnabled ?? true);
+      const isMartil =
+        Boolean(params.isRecoveryOrder) || (isLayering && (cfg.martingaleEnabled ?? true));
 
       const baseLot =
         cfg.lotMode === 'FIXED_LOT'
           ? cfg.fixedLot
           : calculateXauLotSize(curBalance, cfg.riskPercent, entry, refSl);
 
-      let lots = baseLot;
-      if (isMartil) {
+      let lots =
+        params.overrideLots && params.overrideLots > 0
+          ? Math.min(20, Math.max(0.01, Number(params.overrideLots.toFixed(2))))
+          : baseLot;
+      if (!params.overrideLots && isLayering && (cfg.martingaleEnabled ?? true)) {
         const latestSameSide = sameSidePositions.reduce(
           (latest, cur) => (cur.openedAt > latest.openedAt ? cur : latest),
           sameSidePositions[0]
@@ -626,6 +653,11 @@ export default function App() {
       let finalTp = Number(
         (params.overrideTp && params.overrideTp > 0 ? params.overrideTp : params.takeProfit).toFixed(2)
       );
+      if (params.side === 'BUY' && finalTp <= entry + 0.2) {
+        finalTp = Number((entry + Math.max(0.5, atr * 0.65)).toFixed(2));
+      } else if (params.side === 'SELL' && finalTp >= entry - 0.2) {
+        finalTp = Number((entry - Math.max(0.5, atr * 0.65)).toFixed(2));
+      }
 
       if (isLayering) {
         const existingLots = sameSidePositions.reduce((s, p) => s + Math.max(0.01, p.lots), 0);
@@ -838,23 +870,18 @@ export default function App() {
       const targetIds = new Set(matches.map((m) => m.id));
       let closedCount = 0;
       let totalPnl = 0;
+      const closedListNow: ClosedTrade[] = [];
 
-      setSimPositions((prev) => {
-        const remaining: OpenPosition[] = [];
-        const closedList: ClosedTrade[] = [];
-
-        for (const pos of prev) {
-          if (!targetIds.has(pos.id)) {
-            remaining.push(pos);
-            continue;
-          }
+      if (snap) {
+        for (const pos of activePositionsRef.current) {
+          if (!targetIds.has(pos.id)) continue;
           const closePrice = pos.side === 'BUY' ? snap.quote.bid : snap.quote.ask;
           const pnlUsd = calculateXauPnl(pos.side, pos.lots, pos.entryPrice, closePrice);
           const points =
             pos.side === 'BUY' ? closePrice - pos.entryPrice : pos.entryPrice - closePrice;
           totalPnl += pnlUsd;
           closedCount += 1;
-          closedList.push({
+          closedListNow.push({
             id: pos.id,
             side: pos.side,
             lots: pos.lots,
@@ -871,13 +898,15 @@ export default function App() {
             setupPattern: pos.setupPattern,
           });
         }
+      }
 
-        if (closedList.length > 0) {
-          setClosedTrades((hist) => [...closedList, ...hist]);
-          setSimBalance((b) => Number((b + totalPnl).toFixed(2)));
-        }
-        return remaining;
-      });
+      if (closedListNow.length > 0) {
+        const remainingSync = activePositionsRef.current.filter((p) => !targetIds.has(p.id));
+        activePositionsRef.current = remainingSync;
+        setSimPositions(remainingSync);
+        setClosedTrades((hist) => [...closedListNow, ...hist]);
+        setSimBalance((b) => Number((b + totalPnl).toFixed(2)));
+      }
 
       if (closedCount > 0) {
         pushRiskNotification({
@@ -946,6 +975,7 @@ export default function App() {
           .slice(0, 5)
           .map((t) => ({
             side: t.side,
+            lots: t.lots,
             entryPrice: t.entryPrice,
             closePrice: t.closePrice,
             takeProfit: t.takeProfit,
@@ -962,6 +992,15 @@ export default function App() {
           timeframe: activeTimeframeRef.current,
           riskPercent: cfg.riskPercent,
           accountBalance: curBalance,
+          eaLotParams: {
+            lotMode: cfg.lotMode,
+            fixedLot: cfg.fixedLot,
+            riskPercent: cfg.riskPercent,
+            martingaleEnabled: cfg.martingaleEnabled ?? true,
+            martingaleMultiplier: cfg.martingaleMultiplier ?? 2.0,
+            mathRecoveryEnabled: cfg.mathRecoveryEnabled ?? true,
+            mathRecoveryMaxSteps: cfg.mathRecoveryMaxSteps ?? 3,
+          },
           openPositionsCount: positions.length,
           openPositionsSummary: openSummary,
           openPositionsDetail,
@@ -1039,16 +1078,22 @@ export default function App() {
         }
 
         // Notify user of calculated % risk when Gemini identifies an actionable setup
-        if (analysis.signal !== 'HOLD' && !didCloseByAi) {
-          const calcLots =
-            cfg.lotMode === 'FIXED_LOT'
-              ? cfg.fixedLot
-              : calculateXauLotSize(
-                  curBalance,
-                  cfg.riskPercent,
-                  analysis.entryPrice,
-                  analysis.stopLoss
-                );
+        const recPlan = analysis.recoveryPlan;
+        const hasImmediateRecovery = Boolean(
+          (cfg.mathRecoveryEnabled ?? true) && recPlan?.isActive && recPlan.mode === 'EXECUTE_NOW'
+        );
+        if (analysis.signal !== 'HOLD' && (!didCloseByAi || hasImmediateRecovery)) {
+          const calcLots = hasImmediateRecovery
+            ? recPlan!.recoveryLots
+            : cfg.lotMode === 'FIXED_LOT'
+            ? cfg.fixedLot
+            : calculateXauLotSize(
+                curBalance,
+                cfg.riskPercent,
+                analysis.entryPrice,
+                analysis.stopLoss
+              );
+          const targetTpDisplay = hasImmediateRecovery ? recPlan!.recoveryTp : analysis.takeProfit1;
           const signalRiskUsd = Number(
             (Math.abs(analysis.entryPrice - analysis.stopLoss) * calcLots * 100).toFixed(2)
           );
@@ -1064,12 +1109,18 @@ export default function App() {
 
           pushRiskNotification({
             level:
-              !isNoSlMode && activeRiskPct + signalRiskPct >= cfg.maxDailyLossPercent
+              hasImmediateRecovery
+                ? 'WARNING'
+                : !isNoSlMode && activeRiskPct + signalRiskPct >= cfg.maxDailyLossPercent
                 ? 'WARNING'
                 : 'INFO',
-            title: `Sinyal Gemini ${analysis.signal} (${analysis.confidence}%)`,
-            message: isNoSlMode
-              ? `Setup ${analysis.setupPattern}. Rekomendasi ${calcLots.toFixed(2)} lot (Tanpa SL · AI Exit aktif, TP ${analysis.takeProfit1.toFixed(2)}).`
+            title: hasImmediateRecovery
+              ? `Matematikal Recovery 100%: ${analysis.signal} (${analysis.confidence}%)`
+              : `Sinyal Gemini ${analysis.signal} (${analysis.confidence}%)`,
+            message: hasImmediateRecovery
+              ? `Recovery loss -$${recPlan!.lossToRecoverUsd.toFixed(2)} via Martil ${calcLots.toFixed(2)} lot → TP ${targetTpDisplay.toFixed(2)} (+$${recPlan!.expectedNetProfitUsd.toFixed(2)} net).`
+              : isNoSlMode
+              ? `Setup ${analysis.setupPattern}. Rekomendasi ${calcLots.toFixed(2)} lot (Tanpa SL · AI Exit aktif, TP ${targetTpDisplay.toFixed(2)}).`
               : `Setup ${analysis.setupPattern}. Rekomendasi ${calcLots.toFixed(
                   2
                 )} lot dengan risiko ${signalRiskPct.toFixed(2)}% ($${signalRiskUsd.toFixed(2)}).`,
@@ -1079,10 +1130,13 @@ export default function App() {
           });
         }
 
-        // Auto-Execution Guardrail Check (100% AI Judge authority for fresh entry; >=80% confidence for same-side layering/Martil)
+        // Auto-Execution Guardrail Check (100% AI Judge authority for fresh entry; >=80% confidence for same-side layering/Martil; + Mathematical 100% Recovery when invalidated/loss streak)
+        const postClosePositions = activePositionsRef.current;
         const isFullAi = cfg.fullAiControl ?? true;
-        const hasOppositeOpenPosition = positions.some((p) => p.side !== analysis.signal);
-        const hasSameSideOpen = positions.some((p) => p.side === analysis.signal);
+        const hasOppositeOpenPosition = postClosePositions.some(
+          (p) => p.side !== analysis.signal
+        );
+        const hasSameSideOpen = postClosePositions.some((p) => p.side === analysis.signal);
         const sameSideAllowed =
           (cfg.allowSameSideLayering ?? true) &&
           analysis.confidence >= (cfg.sameSideMinConfidence ?? 80);
@@ -1090,14 +1144,21 @@ export default function App() {
           ? sameSideAllowed
           : isFullAi || analysis.confidence >= cfg.minConfidence;
 
+        const recoveryActive = Boolean(
+          (cfg.mathRecoveryEnabled ?? true) &&
+            analysis.recoveryPlan?.isActive &&
+            analysis.recoveryPlan.mode === 'EXECUTE_NOW'
+        );
+        const allowAfterAiExit = !didCloseByAi || recoveryActive;
+
         if (
           triggeredByAuto &&
-          !didCloseByAi &&
+          allowAfterAiExit &&
           cfg.autoExecute &&
           analysis.signal !== 'HOLD' &&
           !hasOppositeOpenPosition &&
           passesConfidence &&
-          positions.length < cfg.maxOpenPositions
+          postClosePositions.length < cfg.maxOpenPositions
         ) {
           const todayStart = new Date();
           todayStart.setHours(0, 0, 0, 0);
@@ -1106,15 +1167,27 @@ export default function App() {
             .reduce((acc, t) => acc + t.pnlUsd, 0);
           const maxLossUsd = (cfg.initialBalance * cfg.maxDailyLossPercent) / 100;
 
-          if (dailyRealized > -maxLossUsd) {
+          if (dailyRealized > -maxLossUsd || recoveryActive) {
+            const useRecovery =
+              recoveryActive && !hasSameSideOpen && analysis.recoveryPlan;
             await openOrder({
               side: analysis.signal,
               stopLoss: analysis.stopLoss,
-              takeProfit: analysis.takeProfit1,
-              overrideTp: hasSameSideOpen ? analysis.highProbTp : undefined,
+              takeProfit: useRecovery
+                ? analysis.recoveryPlan!.recoveryTp
+                : analysis.takeProfit1,
+              overrideTp: hasSameSideOpen
+                ? analysis.highProbTp
+                : useRecovery
+                ? analysis.recoveryPlan!.recoveryTp
+                : undefined,
+              overrideLots: useRecovery ? analysis.recoveryPlan!.recoveryLots : undefined,
+              isRecoveryOrder: Boolean(useRecovery),
               source: 'AI_AUTO',
               confidence: analysis.confidence,
-              setupPattern: analysis.setupPattern,
+              setupPattern: useRecovery
+                ? `Recovery 100%: ${analysis.setupPattern}`
+                : analysis.setupPattern,
             });
           }
         }
@@ -1309,6 +1382,7 @@ export default function App() {
       if (!snap) return;
       const cfg = configRef.current;
       const isScalp =
+        cfg.strategyFocus === 'UNIFIED_8IN1' ||
         cfg.strategyFocus === 'ADAPTIVE_SCALP' ||
         cfg.strategyFocus === 'SCALPING_EMA' ||
         cfg.strategyFocus === 'ULTRA_SCALP';
@@ -1349,14 +1423,29 @@ export default function App() {
     const hasSameSide = activePositionsRef.current.some(
       (p) => p.side === latestAnalysis.signal
     );
+    const useRecovery =
+      !hasSameSide &&
+      (configRef.current.mathRecoveryEnabled ?? true) &&
+      latestAnalysis.recoveryPlan?.isActive &&
+      latestAnalysis.recoveryPlan.mode === 'EXECUTE_NOW';
     void openOrder({
       side: latestAnalysis.signal,
       stopLoss: latestAnalysis.stopLoss,
-      takeProfit: latestAnalysis.takeProfit1,
-      overrideTp: hasSameSide ? latestAnalysis.highProbTp : undefined,
+      takeProfit: useRecovery
+        ? latestAnalysis.recoveryPlan!.recoveryTp
+        : latestAnalysis.takeProfit1,
+      overrideTp: hasSameSide
+        ? latestAnalysis.highProbTp
+        : useRecovery
+        ? latestAnalysis.recoveryPlan!.recoveryTp
+        : undefined,
+      overrideLots: useRecovery ? latestAnalysis.recoveryPlan!.recoveryLots : undefined,
+      isRecoveryOrder: Boolean(useRecovery),
       source: 'AI_MANUAL',
       confidence: latestAnalysis.confidence,
-      setupPattern: latestAnalysis.setupPattern,
+      setupPattern: useRecovery
+        ? `Recovery 100%: ${latestAnalysis.setupPattern}`
+        : latestAnalysis.setupPattern,
     });
   }, [latestAnalysis, openOrder, pushRiskNotification]);
 

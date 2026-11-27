@@ -53,7 +53,7 @@ export const EaSettingsView: React.FC<EaSettingsViewProps> = ({
 
   const applyScalpingPreset = () => {
     onUpdateConfig({
-      strategyFocus: 'ADAPTIVE_SCALP',
+      strategyFocus: 'UNIFIED_8IN1',
       analyzeCadence: '30S',
       fullAiControl: true,
       minConfidence: 76,
@@ -137,6 +137,9 @@ export const EaSettingsView: React.FC<EaSettingsViewProps> = ({
               }
               className="w-full px-3 py-2 text-xs rounded-md bg-[#0B0E14] border border-white/[0.1] text-[#F8FAFC] focus:outline-none focus:border-[#D4AF37]"
             >
+              <option value="UNIFIED_8IN1">
+                Ultra-Scalp 11 Pilar (8-in-1 + Harmonic + LSTM + PA · Predatory Sync)
+              </option>
               <option value="ADAPTIVE_SCALP">
                 Auto Adaptive AI: Momentum M5 + Ultra-Scalp Sniper M1+M5 (Target Winrate ≥90%)
               </option>
@@ -145,6 +148,11 @@ export const EaSettingsView: React.FC<EaSettingsViewProps> = ({
               <option value="LIQUIDITY_SMC">Smart Money Concepts (Liquidity Sweep &amp; BOS)</option>
               <option value="BALANCED">Balanced Confluence (EMA + RSI + MACD + Price Action)</option>
             </select>
+            {config.strategyFocus === 'UNIFIED_8IN1' && (
+              <p className="text-[11px] text-[#10B981] leading-relaxed">
+                Khusus Ultra-Scalping (bukan swing/intraday, TP cepat ≤5–30 menit) dengan Protokol Sinkronisasi Ganda &amp; mode Predatory Surveillance &amp; Predatory Standby: menyatukan 8 metode scalping + Harmonic Pattern (X-A-B-C-D) + Probabilitas LSTM independen AI + Price Action Trading dalam 11 pilar terpadu.
+              </p>
+            )}
             {config.strategyFocus === 'ADAPTIVE_SCALP' && (
               <p className="text-[11px] text-[#10B981] leading-relaxed">
                 EA otomatis memilih antara Momentum M5 (EMA 9/21/50 + Tight ATR) atau Ultra-Scalping M1+M5 (Sniper Breakout) sesuai kondisi pasar, hanya mengeksekusi setup berprobabilitas win ≥90% dan HOLD jika pasar choppy/berisiko.
@@ -224,7 +232,7 @@ export const EaSettingsView: React.FC<EaSettingsViewProps> = ({
                 Deep Learning + Thinking HIGH (Multi-Engine)
               </span>
               <p className="text-[11px] text-[#94A3B8] mt-0.5 leading-relaxed">
-                Mengaktifkan penalaran level HIGH pada Gemini 4 (Hydrogen &amp; Argon), DeepSeek V3 (Airforce), serta OpenRouter (<code>respan/span-01-lite:free</code>, <code>perplexity/pplx-decider-flash-v1.3:free</code>, mode bergantian cepat Span-01 ↔ PPLX dengan auto-takeover jika lambat, <code>heygen/heygen-decision-1-turbo</code>, <code>nace-ai/drex-max</code>, <code>typesafe/jev-1.14</code>, <code>google/gemini-4-argon</code>, <code>google/gemini-4-hydrogen</code>, <code>nvidia/nemotron-3-ultra-550b-a55b:free</code>, <code>moonshotai/kimi-k3.1-pro</code>) beserta ekstraksi k-NN 220 candle, Kaufman ER, Slope, dan Order Flow.
+                Mengaktifkan penalaran level HIGH pada Gemini 4 (Hydrogen &amp; Argon), DeepSeek V3 (Airforce), serta OpenRouter (mode Dual Konsensus <code>google/gemma-4-26b-a4b-it:free</code> + <code>perplexity/pplx-decider-flash-v1.3:free</code> dan <code>cloudflare/clef-flash</code> + <code>perplexity/pplx-decider-v1.2</code>, mode Triple Konsensus 2/3 <code>respan/span-01-lite:free</code> + <code>perplexity/pplx-decider-flash-v1.3:free</code> + <code>antdigital/lingdt-decision-fast-1.0:free</code> yang memproses bersamaan dan wajib minimal 2/3 sepakat searah, mode bergantian Span-01 ↔ PPLX, kelompok Trio Flash <code>inclusionai/ling-3.2-flash:free</code> ↔ <code>baidu/ernie-5.5-flash-preview:free</code> ↔ <code>liquid/lfm-3-1.7b:free</code>, <code>heygen/heygen-decision-1-turbo</code>, <code>nace-ai/drex-max</code>, <code>typesafe/jev-1.14</code>, <code>google/gemini-4-argon</code>, <code>google/gemini-4-hydrogen</code>, <code>nvidia/nemotron-3-ultra-550b-a55b:free</code>, <code>moonshotai/kimi-k3.1-pro</code>) beserta ekstraksi k-NN 220 candle, Kaufman ER, Slope, dan Order Flow.
               </p>
             </div>
             <button
@@ -672,6 +680,66 @@ export const EaSettingsView: React.FC<EaSettingsViewProps> = ({
                     </div>
                   </div>
                 )}
+
+                <div className="pt-2.5 border-t border-white/[0.06] space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <span className="text-[11px] font-medium text-[#E6EDF3]">
+                        Matematikal Recovery 100% (Saat AI Invalid / Balik Arah)
+                      </span>
+                      <p className="text-[10px] text-[#94A3B8] leading-snug mt-0.5">
+                        Jika AI Exit menutup posisi invalid/berbalik arah atau ada loss beruntun, EA menghitung otomatis lot Martil &amp; TP matematis agar pulih 100% + net profit.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={config.mathRecoveryEnabled ?? true}
+                      onClick={() =>
+                        onUpdateConfig({
+                          mathRecoveryEnabled: !(config.mathRecoveryEnabled ?? true),
+                        })
+                      }
+                      className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full border transition-colors ${
+                        (config.mathRecoveryEnabled ?? true)
+                          ? 'bg-[#10B981] border-[#10B981]'
+                          : 'bg-[#1E293B] border-white/15'
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-3 w-3 transform rounded-full bg-[#0B0E14] transition-transform ${
+                          (config.mathRecoveryEnabled ?? true) ? 'translate-x-3' : 'translate-x-0.5'
+                        } mt-[1px]`}
+                      />
+                    </button>
+                  </div>
+                  {(config.mathRecoveryEnabled ?? true) && (
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-[#94A3B8]">
+                        Maks Level Eskalasi Martil Recovery:
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        {[1, 2, 3, 4, 5].map((step) => {
+                          const isActive = (config.mathRecoveryMaxSteps ?? 3) === step;
+                          return (
+                            <button
+                              key={step}
+                              type="button"
+                              onClick={() => onUpdateConfig({ mathRecoveryMaxSteps: step })}
+                              className={`px-2 py-0.5 text-[11px] font-mono tabular-nums rounded border transition-colors ${
+                                isActive
+                                  ? 'bg-[#10B981]/20 border-[#10B981] text-[#10B981] font-semibold'
+                                  : 'bg-[#111620] border-white/[0.08] text-[#94A3B8] hover:text-[#F8FAFC]'
+                              }`}
+                            >
+                              {step}x
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>

@@ -135,11 +135,14 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
   // Compute exact % risk for the next order (AI signal if actionable, else market order)
   const atrVal = atr14 ?? 2.5;
   const isScalpMode =
+    config.strategyFocus === 'UNIFIED_8IN1' ||
     config.strategyFocus === 'ADAPTIVE_SCALP' ||
     config.strategyFocus === 'SCALPING_EMA' ||
     config.strategyFocus === 'ULTRA_SCALP';
   const strategyLabel =
-    config.strategyFocus === 'ADAPTIVE_SCALP'
+    config.strategyFocus === 'UNIFIED_8IN1'
+      ? 'Ultra-Scalp 11-Pilar · Predatory Sync'
+      : config.strategyFocus === 'ADAPTIVE_SCALP'
       ? 'Adaptive M5+M1 (WR ≥90%)'
       : config.strategyFocus === 'ULTRA_SCALP'
       ? 'Ultra-Scalp M1+M5'
@@ -520,6 +523,68 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
               </div>
             )}
 
+            {/* Mathematical 100% Recovery Plan (Martil & Exact TP) */}
+            {analysis.recoveryPlan && analysis.recoveryPlan.isActive && (
+              <div
+                className={`p-2.5 rounded-md border space-y-1.5 text-xs ${
+                  analysis.recoveryPlan.mode === 'EXECUTE_NOW'
+                    ? 'bg-[#D4AF37]/10 border-[#D4AF37]/40'
+                    : 'bg-[#38BDF8]/10 border-[#38BDF8]/30'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-[#F8FAFC]">
+                    Matematikal Recovery 100% (Martil EA)
+                  </span>
+                  <span
+                    className={`font-mono font-bold text-[10px] px-1.5 py-0.5 rounded ${
+                      analysis.recoveryPlan.mode === 'EXECUTE_NOW'
+                        ? 'bg-[#D4AF37]/20 text-[#D4AF37]'
+                        : 'bg-[#38BDF8]/20 text-[#38BDF8]'
+                    }`}
+                  >
+                    {analysis.recoveryPlan.mode === 'EXECUTE_NOW'
+                      ? `EKSEKUSI ${analysis.recoveryPlan.direction}`
+                      : `SIAGA ${analysis.recoveryPlan.direction}`}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] font-mono tabular-nums pt-0.5">
+                  <div className="flex justify-between">
+                    <span className="text-[#94A3B8]">Loss Pulih:</span>
+                    <span className="text-[#EF4444]">
+                      -${analysis.recoveryPlan.lossToRecoverUsd.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#94A3B8]">Lot Martil:</span>
+                    <span className="text-[#D4AF37] font-semibold">
+                      {analysis.recoveryPlan.recoveryLots.toFixed(2)} (
+                      {analysis.recoveryPlan.martingaleEnabled
+                        ? `${analysis.recoveryPlan.martingaleMultiplier.toFixed(1)}x`
+                        : '1.0x'}
+                      )
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#94A3B8]">Breakeven:</span>
+                    <span className="text-[#E6EDF3]">
+                      {analysis.recoveryPlan.breakevenPrice.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#94A3B8]">TP Pulih 100%:</span>
+                    <span className="text-[#10B981] font-semibold">
+                      {analysis.recoveryPlan.recoveryTp.toFixed(2)} (+$
+                      {analysis.recoveryPlan.expectedNetProfitUsd.toFixed(2)})
+                    </span>
+                  </div>
+                </div>
+                <p className="text-[11px] text-[#E6EDF3] leading-relaxed pt-1 border-t border-white/[0.06]">
+                  {analysis.recoveryPlan.rationale}
+                </p>
+              </div>
+            )}
+
             {/* Post-TP Situational Continuation vs Exhaustion Evaluation */}
             {analysis.postTpEvaluation && analysis.postTpEvaluation !== 'NONE' && (
               <div
@@ -571,6 +636,51 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
                     {analysis.keyLevelsSummary}
                   </p>
                 )}
+                {analysis.priceActionSignal && (
+                  <p className="text-[11px] text-[#E6EDF3] leading-relaxed">
+                    <span className="text-[#FBBF24] font-medium">Price Action Trading: </span>
+                    {analysis.priceActionSignal}
+                  </p>
+                )}
+                {analysis.harmonicPattern && (
+                  <p className="text-[11px] text-[#E6EDF3] leading-relaxed">
+                    <span className="text-[#F472B6] font-medium">Harmonic Pattern (XABCD): </span>
+                    {analysis.harmonicPattern}
+                  </p>
+                )}
+                {analysis.lstmProbability && (
+                  <div className="pt-1.5 border-t border-white/[0.08] space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-[#38BDF8] font-medium">
+                        Probabilitas LSTM AI ({analysis.lstmProbability.horizonMinutes}m)
+                      </span>
+                      <span className="font-mono tabular-nums text-[#E6EDF3]">
+                        Naik {analysis.lstmProbability.upPct}% · Hold{' '}
+                        {analysis.lstmProbability.holdPct}% · Turun{' '}
+                        {analysis.lstmProbability.downPct}%
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full rounded-full overflow-hidden flex bg-[#111620]">
+                      <div
+                        className="bg-[#10B981] h-full"
+                        style={{ width: `${analysis.lstmProbability.upPct}%` }}
+                      />
+                      <div
+                        className="bg-[#F59E0B] h-full"
+                        style={{ width: `${analysis.lstmProbability.holdPct}%` }}
+                      />
+                      <div
+                        className="bg-[#EF4444] h-full"
+                        style={{ width: `${analysis.lstmProbability.downPct}%` }}
+                      />
+                    </div>
+                    {analysis.lstmProbability.rationale && (
+                      <p className="text-[10px] text-[#94A3B8] leading-snug">
+                        {analysis.lstmProbability.rationale}
+                      </p>
+                    )}
+                  </div>
+                )}
                 {analysis.indicatorWeighting && (
                   <p className="text-[11px] text-[#94A3B8] leading-relaxed">
                     <span className="text-[#D4AF37] font-medium">Timbangan Indikator: </span>
@@ -583,6 +693,7 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
             {/* OCR, Global Sync, Macro DXY/Geopolitics, MTF M5-H4 & Lock Profit Plan */}
             {(analysis.ocrExtractedPrice ||
               analysis.globalSyncSummary ||
+              analysis.fastBullPositionSummary ||
               analysis.macroSummary ||
               analysis.mtfSummary ||
               (analysis.lockProfitPlan && analysis.signal !== 'HOLD')) && (
@@ -591,6 +702,12 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
                   <p className="text-[#E6EDF3] leading-relaxed">
                     <span className="text-[#D4AF37] font-medium">OCR &amp; Sinkronisasi Global: </span>
                     {[analysis.ocrExtractedPrice, analysis.globalSyncSummary].filter(Boolean).join(' · ')}
+                  </p>
+                )}
+                {analysis.fastBullPositionSummary && (
+                  <p className="text-[#E6EDF3] leading-relaxed">
+                    <span className="text-[#F59E0B] font-medium">FastBull Position Book (XAUUSD): </span>
+                    {analysis.fastBullPositionSummary}
                   </p>
                 )}
                 {analysis.macroSummary && (

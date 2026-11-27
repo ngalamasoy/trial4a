@@ -24,7 +24,11 @@ import {
   type PostTpDecision,
   type RecentClosedTradeContext,
 } from './src/types/trading.ts';
-import { analyzeChartStructure, buildIndicatorPack } from './src/utils/indicators.ts';
+import {
+  analyzeChartStructure,
+  buildIndicatorPack,
+  computeMathematicalRecoveryPlan,
+} from './src/utils/indicators.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -207,10 +211,8 @@ async function generateWithGeminiFallback(
 
       if (isGeminiFallbackEligibleError(err) && hasMoreKeys) {
         const nextSlot = orderedKeys[i + 1];
-        console.warn(
-          `[Gemini Fallback] ${slot.name} (${i + 1}/${orderedKeys.length}) gagal (${
-            isQuota ? '429/Kuota' : isTransient503 ? '503/Server Padat' : 'Auth/Permission'
-          }). Otomatis beralih ke ${nextSlot.name} (${i + 2}/${orderedKeys.length}).`
+        console.log(
+          `[Gemini Rotasi] ${slot.name} (${i + 1}/${orderedKeys.length}) -> beralih ke ${nextSlot.name} (${i + 2}/${orderedKeys.length}).`
         );
         continue;
       }
@@ -224,18 +226,83 @@ async function generateWithGeminiFallback(
 }
 
 function extractJsonObjectString(raw: string): string {
-  let cleaned = raw
+  const cleaned = raw
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/```\s*$/i, '')
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+    .replace(/```(?:json)?/gi, '')
+    .replace(/```/g, '')
     .trim();
+
+  // Scan for balanced JSON objects and return the first (or longest valid) parseable one
+  const candidates: string[] = [];
+  let depth = 0;
+  let startIdx = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') {
+      if (depth === 0) startIdx = i;
+      depth++;
+    } else if (ch === '}' && depth > 0) {
+      depth--;
+      if (depth === 0 && startIdx >= 0) {
+        candidates.push(cleaned.slice(startIdx, i + 1));
+        startIdx = -1;
+      }
+    }
+  }
+
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const normalized = candidates[i]
+      .replace(/,\s*([}\]])/g, '$1')
+      .replace(/[\u0000-\u0019]+/g, ' ');
+    try {
+      const obj = JSON.parse(normalized) as Record<string, unknown>;
+      if (obj && typeof obj === 'object' && ('signal' in obj || 'entryPrice' in obj)) {
+        return normalized;
+      }
+    } catch {
+      // Try earlier candidate
+    }
+  }
+
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const normalized = candidates[i]
+      .replace(/,\s*([}\]])/g, '$1')
+      .replace(/[\u0000-\u0019]+/g, ' ');
+    try {
+      JSON.parse(normalized);
+      return normalized;
+    } catch {
+      // Try next
+    }
+  }
 
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
   if (firstBrace >= 0 && lastBrace > firstBrace) {
-    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+    return cleaned
+      .slice(firstBrace, lastBrace + 1)
+      .replace(/,\s*([}\]])/g, '$1')
+      .replace(/[\u0000-\u0019]+/g, ' ');
   }
-  return cleaned.replace(/,\s*([}\]])/g, '$1');
+  return cleaned;
 }
 
 interface AirforceConfig {
@@ -258,6 +325,7 @@ class AirforceError extends Error {
 const airforceEngineCooldownUntil = new Map<string, number>();
 let aiRoundRobinCursor = 0;
 let respanPplxCursor = 0;
+let flashTrioCursor = 0;
 
 function sanitizeAirforceUrl(raw: string, fallbackUrl: string): string {
   const cleaned = sanitizeSecretToken(raw);
@@ -313,6 +381,8 @@ interface OpenRouterDecisionsConfig {
   decisionsUrl: string;
   chatUrl: string;
   model: string;
+  pplxV12Model: string;
+  clefModel: string;
   respanModel: string;
   heygenModel: string;
   drexModel: string;
@@ -321,6 +391,12 @@ interface OpenRouterDecisionsConfig {
   hydrogenModel: string;
   nemotronModel: string;
   kimiModel: string;
+  lingModel: string;
+  ernieModel: string;
+  lfmModel: string;
+  gemmaModel: string;
+  lingDtModel: string;
+  gptOssModel: string;
 }
 
 class OpenRouterError extends Error {
@@ -373,6 +449,8 @@ function getOpenRouterDecisionsConfig(): OpenRouterDecisionsConfig | null {
   const decisionsUrl = 'https://openrouter.ai/api/alpha/decisions';
   const chatUrl = 'https://openrouter.ai/api/v1/chat/completions';
   const model = 'perplexity/pplx-decider-flash-v1.3:free';
+  const pplxV12Model = 'perplexity/pplx-decider-v1.2';
+  const clefModel = 'cloudflare/clef-flash';
   const respanModel = 'respan/span-01-lite:free';
   const heygenModel = 'heygen/heygen-decision-1-turbo';
   const drexModel = 'nace-ai/drex-max';
@@ -381,12 +459,20 @@ function getOpenRouterDecisionsConfig(): OpenRouterDecisionsConfig | null {
   const hydrogenModel = 'google/gemini-4-hydrogen';
   const nemotronModel = 'nvidia/nemotron-3-ultra-550b-a55b:free';
   const kimiModel = 'moonshotai/kimi-k3.1-pro';
+  const lingModel = 'inclusionai/ling-3.2-flash:free';
+  const ernieModel = 'baidu/ernie-5.5-flash-preview:free';
+  const lfmModel = 'liquid/lfm-3-1.7b:free';
+  const gemmaModel = 'google/gemma-4-26b-a4b-it:free';
+  const lingDtModel = 'antdigital/lingdt-decision-fast-1.0:free';
+  const gptOssModel = 'openai/gpt-oss-20b';
 
   return {
     apiKey,
     decisionsUrl,
     chatUrl,
     model,
+    pplxV12Model,
+    clefModel,
     respanModel,
     heygenModel,
     drexModel,
@@ -395,6 +481,12 @@ function getOpenRouterDecisionsConfig(): OpenRouterDecisionsConfig | null {
     hydrogenModel,
     nemotronModel,
     kimiModel,
+    lingModel,
+    ernieModel,
+    lfmModel,
+    gemmaModel,
+    lingDtModel,
+    gptOssModel,
   };
 }
 
@@ -543,28 +635,45 @@ ATURAN OUTPUT JSON (AIRFORCE ${cfg.model.toUpperCase()}):
 async function generateAnalysisViaOpenRouterChat(opts: {
   cfg: OpenRouterDecisionsConfig;
   modelName: string;
+  timeoutMs?: number;
   systemInstruction: string;
   promptText: string;
+  compactPromptText?: string;
   chartImageBase64?: string;
   thinkingHigh?: boolean;
 }): Promise<{ rawText: string; model: string; usedChartVision: boolean }> {
   const {
     cfg,
     modelName,
+    timeoutMs,
     systemInstruction,
     promptText,
+    compactPromptText,
     chartImageBase64,
     thinkingHigh = true,
   } = opts;
 
-  const jsonContract = `
+  const isLightweightModel = /liquid\/lfm/i.test(modelName);
+  const activePrompt = isLightweightModel && compactPromptText ? compactPromptText : promptText;
+
+  const jsonContract = isLightweightModel
+    ? `
+
+Rules:
+- signal must be "BUY", "SELL", or "HOLD".
+- marketBias must be "BULLISH", "BEARISH", or "RANGING".
+- positionDecision must be "NONE", "KEEP", "CLOSE_BUY", "CLOSE_SELL", or "CLOSE_ALL".
+- Use real numbers from the market data above for entryPrice, stopLoss, takeProfit1, takeProfit2.
+- Output ONLY 1 valid JSON object matching this exact schema (no markdown, no extra text):
+{"signal":"HOLD","confidence":60,"marketBias":"RANGING","positionDecision":"NONE","positionReason":"Tidak ada posisi terbuka.","winProbability":70,"reversalConfidence":20,"highProbTp":0,"highProbTpConfidence":88,"postTpEvaluation":"NONE","postTpReason":"none","keyLevelsSummary":"S1/R1 summary","priceActionSignal":"NETRAL — Konsolidasi candle tanpa Pin Bar / Engulfing / Breakout bersih","harmonicPattern":"Tidak ada pola Harmonic X-A-B-C-D valid saat ini","lstmProbability":{"upPct":33,"downPct":33,"holdPct":34,"horizonMinutes":15,"rationale":"Struktur sideways, probabilitas seimbang."},"judgeVerdict":"VONIS","indicatorWeighting":"S/R + price action","entryPrice":3580.00,"stopLoss":3575.00,"takeProfit1":3585.00,"takeProfit2":3590.00,"riskRewardRatio":"1:1.5","setupPattern":"Consolidation","summary":"Ringkasan singkat kondisi XAU/USD saat ini.","keyFactors":["S/R utama","Struktur M5"],"invalidatedIf":"Break S1/R1"}`
+    : `
 
 ATURAN OUTPUT JSON (OPENROUTER ${modelName.toUpperCase()}):
 - ${
-    thinkingHigh
-      ? 'MODE ANALISA MENDALAM AKTIF: Lakukan pembacaan visual chart (Bid/Ask & sumbu Y), peta Support/Resistance, struktur harga M5-H4, DXY/geopolitik, dan audit trade terdahulu, lalu WAJIB keluarkan 1 objek JSON valid.'
-      : 'Analisa ringkas lalu langsung keluarkan 1 objek JSON valid.'
-  }
+        thinkingHigh
+          ? 'MODE ANALISA MENDALAM AKTIF: Lakukan pembacaan visual chart (Bid/Ask & sumbu Y), peta Support/Resistance, Price Action murni (Pin Bar/Engulfing/Inside Bar/HH-HL), Harmonic Pattern X-A-B-C-D, hitung sendiri probabilitas LSTM independen, struktur M5-H4, DXY/geopolitik, dan audit trade terdahulu, lalu WAJIB keluarkan 1 objek JSON valid.'
+          : 'Analisa ringkas lalu langsung keluarkan 1 objek JSON valid.'
+      }
 - Balas HANYA dengan 1 objek JSON valid (tanpa markdown code fence) persis berformat:
 {
   "signal": "BUY" | "SELL" | "HOLD",
@@ -579,6 +688,15 @@ ATURAN OUTPUT JSON (OPENROUTER ${modelName.toUpperCase()}):
   "postTpEvaluation": "NONE" | "RE_ENTRY_CONTINUATION" | "WAIT_PULLBACK_HOLD" | "EXHAUSTION_SKIP",
   "postTpReason": string,
   "keyLevelsSummary": string,
+  "priceActionSignal": string (analisa Price Action Trading murni: Pin Bar/Hammer/Shooting Star, Engulfing, Inside Bar Breakout, & struktur swing HH-HL/LH-LL),
+  "harmonicPattern": string (evaluasi pola Harmonic X-A-B-C-D, rasio Fibo & zona PRZ, atau sebutkan belum terbentuk),
+  "lstmProbability": {
+    "upPct": number (0-100, probabilitas kenaikan menurut perhitungan LSTM independen Anda),
+    "downPct": number (0-100, probabilitas penurunan menurut perhitungan LSTM independen Anda),
+    "holdPct": number (0-100, probabilitas sideways/konsolidasi; upPct+downPct+holdPct=100),
+    "horizonMinutes": number (misal 5, 10, atau 15),
+    "rationale": string (alasan perhitungan LSTM mandiri dari urutan candle, k-NN, akselerasi & order flow)
+  },
   "judgeVerdict": string,
   "indicatorWeighting": string,
   "ocrExtractedPrice": string,
@@ -596,27 +714,42 @@ ATURAN OUTPUT JSON (OPENROUTER ${modelName.toUpperCase()}):
   "invalidatedIf": string
 }`;
 
-  const isReasoningChat = /nemotron|kimi/i.test(modelName);
-  const supportsVision = !/nemotron/i.test(modelName);
+  const isReasoningChat = /nemotron|kimi|ernie|ling|liquid\/lfm|gemma-4|gpt-oss/i.test(modelName);
+  const supportsVision = !/nemotron|liquid\/lfm|gpt-oss/i.test(modelName);
+  const effectiveTimeoutMs = timeoutMs ?? (isReasoningChat ? 110_000 : 45_000);
 
   const callChat = async (
     withImage: boolean,
     useResponseFormat: boolean,
-    useReasoningEffort: boolean
+    useReasoningEffort: boolean,
+    useSystemRole: boolean
   ): Promise<string> => {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), isReasoningChat ? 110_000 : 45_000);
+    const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
     try {
+      const systemText = isLightweightModel
+        ? 'You are an expert XAU/USD M5 scalping analyst. Output ONLY 1 valid JSON object.'
+        : systemInstruction;
+      const promptWithContract = useSystemRole
+        ? `${activePrompt}${jsonContract}`
+        : `${systemText}\n\n${activePrompt}${jsonContract}`;
       const userContent =
         withImage && chartImageBase64
           ? [
-              { type: 'text', text: `${promptText}${jsonContract}` },
+              { type: 'text', text: promptWithContract },
               {
                 type: 'image_url',
                 image_url: { url: `data:image/png;base64,${chartImageBase64}` },
               },
             ]
-          : `${promptText}${jsonContract}`;
+          : promptWithContract;
+
+      const messages = useSystemRole
+        ? [
+            { role: 'system', content: systemText },
+            { role: 'user', content: userContent },
+          ]
+        : [{ role: 'user', content: userContent }];
 
       const res = await fetch(cfg.chatUrl, {
         method: 'POST',
@@ -629,18 +762,15 @@ ATURAN OUTPUT JSON (OPENROUTER ${modelName.toUpperCase()}):
         },
         body: JSON.stringify({
           model: modelName,
-          messages: [
-            { role: 'system', content: systemInstruction },
-            { role: 'user', content: userContent },
-          ],
-          temperature: 0.2,
-          max_tokens: isReasoningChat ? 8000 : 3000,
+          messages,
+          temperature: isLightweightModel ? 0.1 : 0.2,
+          max_tokens: isLightweightModel ? 2400 : isReasoningChat ? 8000 : 3000,
           stream: false,
           ...(useReasoningEffort && isReasoningChat
             ? {
-                reasoning: /nemotron/i.test(modelName)
-                  ? { enabled: false }
-                  : { effort: 'low' },
+                reasoning: /kimi|gpt-oss/i.test(modelName)
+                  ? { effort: 'low' }
+                  : { enabled: false },
               }
             : {}),
           ...(useResponseFormat ? { response_format: { type: 'json_object' } } : {}),
@@ -722,9 +852,10 @@ ATURAN OUTPUT JSON (OPENROUTER ${modelName.toUpperCase()}):
   let withImage = Boolean(chartImageBase64) && supportsVision;
   let useFmt = true;
   let useReasoning = isReasoningChat;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  let useSystemRole = !/google\/gemma/i.test(modelName);
+  for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      const rawText = await callChat(withImage, useFmt, useReasoning);
+      const rawText = await callChat(withImage, useFmt, useReasoning, useSystemRole);
       return {
         rawText,
         model: `openrouter/${modelName}`,
@@ -732,33 +863,50 @@ ATURAN OUTPUT JSON (OPENROUTER ${modelName.toUpperCase()}):
       };
     } catch (err) {
       if (err instanceof OpenRouterError) {
+        const isClientRejection = err.statusCode === 400 || err.statusCode === 422;
         if (
-          useReasoning &&
-          (err.statusCode === 400 || err.statusCode === 422) &&
-          /reasoning/i.test(err.detail)
+          useSystemRole &&
+          isClientRejection &&
+          /system|developer instruction|role/i.test(err.detail)
         ) {
+          useSystemRole = false;
+          continue;
+        }
+        if (useReasoning && isClientRejection && /reasoning/i.test(err.detail)) {
           useReasoning = false;
           continue;
         }
         if (
           useFmt &&
-          (err.statusCode === 400 || err.statusCode === 422) &&
-          /response_format|json_object/i.test(err.detail)
+          isClientRejection &&
+          /response_format|json_object|structured/i.test(err.detail)
         ) {
           useFmt = false;
           continue;
         }
         if (
           withImage &&
-          (err.statusCode === 400 ||
-            err.statusCode === 422 ||
+          (isClientRejection ||
             (err.statusCode === 404 && /image|vision|multimodal/i.test(err.detail)))
         ) {
           withImage = false;
           continue;
         }
+        // Generic parameter fallback on HTTP 400/422 if optional flags are still enabled
+        if (isClientRejection && useFmt) {
+          useFmt = false;
+          continue;
+        }
+        if (isClientRejection && useReasoning) {
+          useReasoning = false;
+          continue;
+        }
+        if (isClientRejection && useSystemRole) {
+          useSystemRole = false;
+          continue;
+        }
         if (attempt === 0 && err.statusCode === 502 && /JSON/i.test(err.detail)) {
-          useFmt = true;
+          useFmt = false;
           continue;
         }
       }
@@ -797,9 +945,10 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
     hasRecentClosedContext,
   } = opts;
   const activeDecisionModel = modelOverride || cfg.model;
-  const isRespanModel = /^respan\//i.test(activeDecisionModel);
+  let useNoulFormat = /^respan\//i.test(activeDecisionModel);
 
-  const questions: Record<string, unknown> = isRespanModel
+  const buildQuestions = (asNoul: boolean): Record<string, unknown> => {
+    const q: Record<string, unknown> = asNoul
     ? {
         buy_signal: {
           type: 'noul',
@@ -908,8 +1057,8 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
       };
 
   if (openPositionsCount > 0) {
-    if (isRespanModel) {
-      questions.close_positions_now = {
+    if (asNoul) {
+      q.close_positions_now = {
         type: 'noul',
         instructions:
           'Should all currently open positions be closed immediately under strict AI Exit Judge rules?',
@@ -918,7 +1067,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
           false: 'Win probability >= 20% OR reversal confidence < 80%; keep position open.',
         },
       };
-      questions.win_prob_healthy = {
+      q.win_prob_healthy = {
         type: 'noul',
         instructions:
           'Do currently open positions still have at least 50% probability of reaching Take Profit?',
@@ -927,7 +1076,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
           false: 'Win probability has collapsed below 20%.',
         },
       };
-      questions.reversal_confirmed = {
+      q.reversal_confirmed = {
         type: 'noul',
         instructions:
           'Is there a high-confidence (>=80%) confirmed price reversal moving against open positions?',
@@ -937,7 +1086,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
         },
       };
     } else {
-      questions.position_decision = {
+      q.position_decision = {
         type: 'choice',
         instructions:
           'Evaluate open positions (running without hard SL, TP active). STRICT RULE: KEEP unless win probability of reaching TP is BELOW 20% AND there is a confirmed price reversal indication against the position with at least 80% confidence.',
@@ -948,7 +1097,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
           CLOSE_ALL: 'Win probability is BELOW 20% AND strong multi-candle reversal against all open positions is indicated with >= 80% confidence; close all immediately.',
         },
       };
-      questions.position_win_probability = {
+      q.position_win_probability = {
         type: 'score',
         instructions: 'Estimated probability (0-100%) that currently open positions will still hit Take Profit.',
         criteria: [
@@ -959,7 +1108,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
           'High chance (>= 90% win chance)',
         ],
       };
-      questions.reversal_confidence = {
+      q.reversal_confidence = {
         type: 'score',
         instructions: 'Confidence (0-100%) that market structure is actively reversing against the open positions.',
         criteria: [
@@ -974,8 +1123,8 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
   }
 
   if (hasRecentClosedContext) {
-    if (isRespanModel) {
-      questions.post_tp_reentry = {
+    if (asNoul) {
+      q.post_tp_reentry = {
         type: 'noul',
         instructions:
           'After the recent TP/close, does clean directional momentum allow safe same-side re-entry?',
@@ -985,7 +1134,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
         },
       };
     } else {
-      questions.post_tp_evaluation = {
+      q.post_tp_evaluation = {
         type: 'choice',
         instructions:
           'Post-TP situational evaluation: decide whether trend continuation allows same-side re-entry or requires waiting/skipping without spontaneous counter-trend entry.',
@@ -1000,10 +1149,12 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
       };
     }
   }
+    return q;
+  };
 
   const stateText = `${systemInstruction}\n\n${promptText}`;
 
-  const callDecisions = async (withImage: boolean) => {
+  const callDecisions = async (withImage: boolean, asNoul: boolean) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const statePayload =
@@ -1032,7 +1183,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
         body: JSON.stringify({
           model: activeDecisionModel,
           state: statePayload,
-          questions,
+          questions: buildQuestions(asNoul),
         }),
       });
 
@@ -1093,25 +1244,29 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
   };
 
   let answers: Record<string, Record<string, unknown>> | null = null;
-  let usedChartVision = Boolean(chartImageBase64) && !isRespanModel;
+  let usedChartVision = Boolean(chartImageBase64) && !useNoulFormat;
 
-  if (chartImageBase64 && !isRespanModel) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      answers = await callDecisions(true);
+      answers = await callDecisions(usedChartVision, useNoulFormat);
+      break;
     } catch (err) {
-      if (
-        err instanceof OpenRouterError &&
-        (err.statusCode === 400 || err.statusCode === 422)
-      ) {
-        usedChartVision = false;
-        answers = await callDecisions(false);
-      } else {
-        throw err;
+      if (err instanceof OpenRouterError && (err.statusCode === 400 || err.statusCode === 422)) {
+        if (!useNoulFormat && /only accepts noul|noul questions/i.test(err.detail)) {
+          useNoulFormat = true;
+          usedChartVision = false;
+          continue;
+        }
+        if (usedChartVision) {
+          usedChartVision = false;
+          continue;
+        }
       }
+      throw err;
     }
-  } else {
-    usedChartVision = false;
-    answers = await callDecisions(false);
+  }
+  if (!answers) {
+    throw new OpenRouterError(502, `Gagal mendapatkan respon valid dari ${activeDecisionModel}.`);
   }
 
   const pickChoice = <T extends string>(
@@ -1235,7 +1390,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
     probsText: string;
   };
 
-  if (isRespanModel) {
+  if (useNoulFormat) {
     const pBuy = pickNoulYesProb('buy_signal', 0.2);
     const pSell = pickNoulYesProb('sell_signal', 0.2);
     const pHold = pickNoulYesProb('hold_wait', 0.6);
@@ -1438,6 +1593,24 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
       ? Number((snapshot.quote.bid - highProbTpDist).toFixed(2))
       : Number((snapshot.quote.ask + highProbTpDist).toFixed(2));
 
+  const hp = chartStructure.harmonicPattern;
+  const harmonicDesc = hp
+    ? `${hp.direction} ${hp.name} (${hp.status}) PRZ ${hp.przLow.toFixed(2)}-${hp.przHigh.toFixed(2)} | ${hp.ratiosSummary} | TP1=${hp.target1.toFixed(2)}`
+    : 'Belum ada pola Harmonic X-A-B-C-D yang mencapai zona PRZ valid saat ini.';
+
+  const buyMatch = sig.probsText.match(/BUY\s+(\d+)%/i);
+  const sellMatch = sig.probsText.match(/SELL\s+(\d+)%/i);
+  const rawUp = buyMatch ? Number(buyMatch[1]) : sig.choice === 'BUY' ? Math.round(sig.prob * 100) : 25;
+  const rawDown = sellMatch ? Number(sellMatch[1]) : sig.choice === 'SELL' ? Math.round(sig.prob * 100) : 25;
+  const rawHold = Math.max(0, 100 - rawUp - rawDown);
+  const deciderLstm = {
+    upPct: rawUp,
+    downPct: rawDown,
+    holdPct: rawHold,
+    horizonMinutes: isScalpMode ? 5 : 30,
+    rationale: `Distribusi probabilitas Alpha Decisions ${activeDecisionModel} (${sig.probsText}) & struktur ${chartStructure.marketStructure}.`,
+  };
+
   const synthesized = {
     signal: sig.choice,
     confidence,
@@ -1456,8 +1629,15 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
       ? `Evaluasi pasca-TP OpenRouter Decider (${Math.round(postTpEval.prob * 100)}%): ${postTpEval.choice} (${postTpEval.probsText}).`
       : 'Tidak ada konteks pasca-TP aktif.',
     keyLevelsSummary,
+    priceActionSignal: `${chartStructure.marketStructure} | ${
+      chartStructure.candlestickPatterns.length > 0
+        ? chartStructure.candlestickPatterns.join(', ')
+        : chartStructure.pricePositionNote
+    }`,
+    harmonicPattern: harmonicDesc,
+    lstmProbability: deciderLstm,
     judgeVerdict: `VONIS DECIDER: ${sig.choice} (${confidence}%) — Probabilitas [${sig.probsText}]`,
-    indicatorWeighting: `Probabilitas OpenRouter Decisions: Bias ${bias.probsText} | S/R & Price Action sebagai bobot utama, indikator hanya penunjang.`,
+    indicatorWeighting: `Probabilitas OpenRouter Decisions: Bias ${bias.probsText} | Harmonic: ${hp ? `${hp.name} (${hp.direction})` : 'Netral'} | S/R & Price Action sebagai bobot utama.`,
     entryPrice,
     stopLoss,
     takeProfit1,
@@ -1468,9 +1648,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
     keyFactors: [
       `Distribusi Keputusan: ${sig.probsText}`,
       `Bias Struktur: ${bias.probsText}`,
-      `Support/Resistance: ${
-        nearSup ? `S1 ${nearSup.price.toFixed(2)}` : 'No S1'
-      } / ${nearRes ? `R1 ${nearRes.price.toFixed(2)}` : 'No R1'}`,
+      `Harmonic X-A-B-C-D: ${hp ? `${hp.direction} ${hp.name} (${hp.status})` : 'Tidak ada PRZ aktif'}`,
       `Target ATR: SL ${slAtrMult.toFixed(2)}x ATR · TP1 ${tp1AtrMult.toFixed(2)}x ATR (${rr})`,
     ],
     invalidatedIf:
@@ -1619,6 +1797,25 @@ function buildDeepLearningTelemetry(candles: Candle[], atr: number): string {
   const avgSim =
     topK.length > 0 ? (topK.reduce((acc, m) => acc + m.sim, 0) / topK.length) * 100 : 0;
 
+  // Quantitative Bi-Directional Sequence Gate Baseline (for AI independent LSTM probability calculation)
+  const seqScoreUp =
+    (slope10 > 0 ? 18 : 0) +
+    (slope20 > 0 ? 12 : 0) +
+    (accel > 0 ? 10 : 0) +
+    (buyPressurePct >= 55 ? 12 : 0) +
+    (bullFwd3 >= 4 ? 16 : bullFwd3 === 3 ? 10 : 0);
+  const seqScoreDown =
+    (slope10 < 0 ? 18 : 0) +
+    (slope20 < 0 ? 12 : 0) +
+    (accel < 0 ? 10 : 0) +
+    (buyPressurePct <= 45 ? 12 : 0) +
+    (bullFwd3 <= 1 ? 16 : bullFwd3 === 2 ? 10 : 0);
+  const chopHoldBoost = er14 <= 0.22 ? 32 : er14 <= 0.35 ? 18 : 8;
+  const rawTotalGate = Math.max(1, seqScoreUp + seqScoreDown + chopHoldBoost);
+  const quantLstmUp = Math.round((seqScoreUp / rawTotalGate) * 100);
+  const quantLstmDown = Math.round((seqScoreDown / rawTotalGate) * 100);
+  const quantLstmHold = Math.max(0, 100 - quantLstmUp - quantLstmDown);
+
   return [
     `- Vektor Momentum Multi-Horizon: 1-Bar=${ret(1)} | 3-Bar=${ret(3)} | 6-Bar=${ret(6)} | 12-Bar=${ret(12)} | 24-Bar=${ret(24)}`,
     `- Regresi Linear & Akselerasi: Slope10=${slope10 >= 0 ? '+' : ''}${slope10.toFixed(2)} USD/bar | Slope20=${slope20 >= 0 ? '+' : ''}${slope20.toFixed(2)} | Akselerasi 5-bar=${accel >= 0 ? '+' : ''}${accel.toFixed(2)}`,
@@ -1626,6 +1823,7 @@ function buildDeepLearningTelemetry(candles: Candle[], atr: number): string {
     `- Rezim Volatilitas: Rasio ATR14/Mean50 = ${volRatio.toFixed(2)}x -> ${volRegime}`,
     `- Order Flow & Likuiditas (10 Candle): Dominasi Buyer Body=${buyPressurePct.toFixed(1)}% vs Seller=${(100 - buyPressurePct).toFixed(1)}% | Total Ekor Atas=${upperWickSum.toFixed(2)} USD vs Ekor Bawah=${lowerWickSum.toFixed(2)} USD`,
     `- Memori Pola Sekuensial k-NN (${n} Candle): Top-5 pola 5-candle termirip (kemiripan rata-rata ${avgSim.toFixed(1)}%) menghasilkan ${bullFwd3}/5 lanjutan BULLISH dalam 3 candle berikutnya dengan rata-rata perubahan ${avgFwd3 >= 0 ? '+' : ''}${avgFwd3.toFixed(2)} USD.`,
+    `- Baseline Sekuens Bi-Directional Kuantitatif (Bahan Kalibrasi LSTM AI): P(Naik)=${quantLstmUp}% | P(Turun)=${quantLstmDown}% | P(Sideways/Hold)=${quantLstmHold}% (wajib dihitung ulang secara mandiri oleh AI sebagai trader profesional bersama struktur MTF, Harmonic PRZ & DXY).`,
   ].join('\n');
 }
 
@@ -2468,8 +2666,7 @@ async function getMarketSnapshot(
 
   try {
     return await getTradingViewBrokerSnapshot(brokerId, timeframe);
-  } catch (err) {
-    console.warn(`[BrokerFeed ${brokerId} ${timeframe}] Fallback ke Spot feed:`, err);
+  } catch {
     return getSpotFallbackSnapshot(timeframe, forceRefresh);
   }
 }
@@ -2602,6 +2799,314 @@ async function fetchMacroAndGeopoliticsContext(): Promise<MacroContext> {
   return data;
 }
 
+interface FastBullCluster {
+  range: string;
+  price: number;
+  buyPct: number;
+  sellPct: number;
+}
+
+interface FastBullListPositionContext {
+  available: boolean;
+  sourceUrl: string;
+  currentPrice: number | null;
+  updatedAtIso: string | null;
+  openPositions: {
+    totalLongPct: number;
+    totalShortPct: number;
+    nearLongPct: number;
+    nearShortPct: number;
+    dominantSide: 'CROWDED_LONG' | 'CROWDED_SHORT' | 'LONG_LEAN' | 'SHORT_LEAN' | 'BALANCED';
+    topClusters: FastBullCluster[];
+  } | null;
+  pendingOrders: {
+    totalBuyPct: number;
+    totalSellPct: number;
+    nearBuyPct: number;
+    nearSellPct: number;
+    buyLimitBelowPct: number;
+    sellLimitAbovePct: number;
+    buyStopAbovePct: number;
+    sellStopBelowPct: number;
+    topBuyLimitsBelow: FastBullCluster[];
+    topSellLimitsAbove: FastBullCluster[];
+    topBuyStopsAbove: FastBullCluster[];
+    topSellStopsBelow: FastBullCluster[];
+  } | null;
+  orderBookBias: 'BUY' | 'SELL' | 'NEUTRAL';
+  summary: string;
+  promptBlock: string;
+}
+
+let fastBullPositionCache: { data: FastBullListPositionContext; fetchedAt: number } | null = null;
+
+async function fetchFastBullListPositionXauusd(): Promise<FastBullListPositionContext> {
+  if (fastBullPositionCache && Date.now() - fastBullPositionCache.fetchedAt < 15_000) {
+    return fastBullPositionCache.data;
+  }
+
+  const sourceUrl = 'https://www.fastbull.com/list-position';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4500);
+
+  try {
+    const res = await fetch(
+      'https://api.fastbull.com/fastbull-macro-data-service/api/getWebPendingOrder?orderType=0&pairId=28&selectTime=',
+      {
+        signal: controller.signal,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          Referer: sourceUrl,
+          Origin: 'https://www.fastbull.com',
+          Accept: 'application/json, text/plain, */*',
+        },
+      }
+    );
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const payload = (await res.json()) as {
+      code?: number;
+      subCode?: string;
+      bodyMessage?: string;
+    };
+
+    if (payload.code !== 0 || !payload.bodyMessage) {
+      throw new Error('Payload FastBull list-position kosong');
+    }
+
+    interface FastBullRawItem {
+      type?: number;
+      currentPrice?: string | number;
+      createTime?: number;
+      minPrice?: Array<string | number>;
+      priceRange?: string[];
+      buyOrder?: Array<string | number>;
+      sellOrder?: Array<string | number>;
+    }
+
+    const items = JSON.parse(payload.bodyMessage) as FastBullRawItem[];
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new Error('Data XAUUSD list-position kosong');
+    }
+
+    const pendingItem = items.find((i) => i.type === 1) ?? items[0];
+    const positionItem = items.find((i) => i.type === 2) ?? items[1] ?? null;
+
+    const curPriceRaw = Number(pendingItem?.currentPrice ?? positionItem?.currentPrice);
+    const currentPrice = Number.isFinite(curPriceRaw) && curPriceRaw > 100 ? Number(curPriceRaw.toFixed(2)) : null;
+    const createTs = Number(pendingItem?.createTime ?? positionItem?.createTime);
+    const updatedAtIso =
+      Number.isFinite(createTs) && createTs > 1_000_000_000
+        ? new Date(createTs * 1000).toISOString()
+        : null;
+
+    const spotRef = currentPrice ?? 0;
+
+    // Parse Item type=1 (Pending Orders: Buy Limit/Stop & Sell Limit/Stop)
+    let pendingOrders: FastBullListPositionContext['pendingOrders'] = null;
+    if (pendingItem && Array.isArray(pendingItem.minPrice) && Array.isArray(pendingItem.buyOrder) && Array.isArray(pendingItem.sellOrder)) {
+      let totalBuy = 0;
+      let totalSell = 0;
+      let nearBuy = 0;
+      let nearSell = 0;
+      let buyLimitBelow = 0;
+      let sellLimitAbove = 0;
+      let buyStopAbove = 0;
+      let sellStopBelow = 0;
+      const buyLimitsBelow: FastBullCluster[] = [];
+      const sellLimitsAbove: FastBullCluster[] = [];
+      const buyStopsAbove: FastBullCluster[] = [];
+      const sellStopsBelow: FastBullCluster[] = [];
+
+      for (let i = 0; i < pendingItem.minPrice.length; i++) {
+        const p = Number(pendingItem.minPrice[i]);
+        const b = Number(pendingItem.buyOrder[i]) || 0;
+        const s = Number(pendingItem.sellOrder[i]) || 0;
+        const range = pendingItem.priceRange?.[i] || `${p.toFixed(2)}`;
+        totalBuy += b;
+        totalSell += s;
+
+        if (spotRef > 0 && Math.abs(p - spotRef) <= 25) {
+          nearBuy += b;
+          nearSell += s;
+          if (p <= spotRef) {
+            buyLimitBelow += b;
+            sellStopBelow += s;
+            if (b >= 0.05) buyLimitsBelow.push({ range, price: p, buyPct: b, sellPct: s });
+            if (s >= 0.05) sellStopsBelow.push({ range, price: p, buyPct: b, sellPct: s });
+          } else {
+            sellLimitAbove += s;
+            buyStopAbove += b;
+            if (s >= 0.05) sellLimitsAbove.push({ range, price: p, buyPct: b, sellPct: s });
+            if (b >= 0.05) buyStopsAbove.push({ range, price: p, buyPct: b, sellPct: s });
+          }
+        }
+      }
+
+      pendingOrders = {
+        totalBuyPct: Number(totalBuy.toFixed(2)),
+        totalSellPct: Number(totalSell.toFixed(2)),
+        nearBuyPct: Number(nearBuy.toFixed(2)),
+        nearSellPct: Number(nearSell.toFixed(2)),
+        buyLimitBelowPct: Number(buyLimitBelow.toFixed(2)),
+        sellLimitAbovePct: Number(sellLimitAbove.toFixed(2)),
+        buyStopAbovePct: Number(buyStopAbove.toFixed(2)),
+        sellStopBelowPct: Number(sellStopBelow.toFixed(2)),
+        topBuyLimitsBelow: buyLimitsBelow.sort((a, b) => b.buyPct - a.buyPct).slice(0, 3),
+        topSellLimitsAbove: sellLimitsAbove.sort((a, b) => b.sellPct - a.sellPct).slice(0, 3),
+        topBuyStopsAbove: buyStopsAbove.sort((a, b) => b.buyPct - a.buyPct).slice(0, 2),
+        topSellStopsBelow: sellStopsBelow.sort((a, b) => b.sellPct - a.sellPct).slice(0, 2),
+      };
+    }
+
+    // Parse Item type=2 (Open Positions: Active Trader Long vs Short)
+    let openPositions: FastBullListPositionContext['openPositions'] = null;
+    if (positionItem && Array.isArray(positionItem.minPrice) && Array.isArray(positionItem.buyOrder) && Array.isArray(positionItem.sellOrder)) {
+      let totalLong = 0;
+      let totalShort = 0;
+      let nearLong = 0;
+      let nearShort = 0;
+      const clusters: FastBullCluster[] = [];
+
+      for (let i = 0; i < positionItem.minPrice.length; i++) {
+        const p = Number(positionItem.minPrice[i]);
+        const b = Number(positionItem.buyOrder[i]) || 0;
+        const s = Number(positionItem.sellOrder[i]) || 0;
+        const range = positionItem.priceRange?.[i] || `${p.toFixed(2)}`;
+        totalLong += b;
+        totalShort += s;
+
+        if (spotRef > 0 && Math.abs(p - spotRef) <= 25) {
+          nearLong += b;
+          nearShort += s;
+          if (b >= 0.12 || s >= 0.12) {
+            clusters.push({ range, price: p, buyPct: b, sellPct: s });
+          }
+        }
+      }
+
+      const totSum = Math.max(0.01, totalLong + totalShort);
+      const longShare = (totalLong / totSum) * 100;
+      const shortShare = (totalShort / totSum) * 100;
+      const dominantSide: NonNullable<FastBullListPositionContext['openPositions']>['dominantSide'] =
+        longShare >= 68
+          ? 'CROWDED_LONG'
+          : shortShare >= 68
+          ? 'CROWDED_SHORT'
+          : longShare >= 56
+          ? 'LONG_LEAN'
+          : shortShare >= 56
+          ? 'SHORT_LEAN'
+          : 'BALANCED';
+
+      openPositions = {
+        totalLongPct: Number(longShare.toFixed(1)),
+        totalShortPct: Number(shortShare.toFixed(1)),
+        nearLongPct: Number(nearLong.toFixed(2)),
+        nearShortPct: Number(nearShort.toFixed(2)),
+        dominantSide,
+        topClusters: clusters
+          .sort((a, b) => b.buyPct + b.sellPct - (a.buyPct + a.sellPct))
+          .slice(0, 4),
+      };
+    }
+
+    // Synthesize near-spot institutional orderbook pressure
+    let orderBookBias: FastBullListPositionContext['orderBookBias'] = 'NEUTRAL';
+    if (pendingOrders) {
+      const demandScore = pendingOrders.buyLimitBelowPct + pendingOrders.buyStopAbovePct * 0.5;
+      const supplyScore = pendingOrders.sellLimitAbovePct + pendingOrders.sellStopBelowPct * 0.5;
+      if (demandScore > supplyScore * 1.18) {
+        orderBookBias = 'BUY';
+      } else if (supplyScore > demandScore * 1.18) {
+        orderBookBias = 'SELL';
+      }
+    }
+
+    const fmtClusters = (list: FastBullCluster[], side: 'buy' | 'sell') =>
+      list.length > 0
+        ? list.map((c) => `${c.range} (${side === 'buy' ? c.buyPct : c.sellPct}%)`).join(', ')
+        : 'Tidak ada cluster besar';
+
+    const posText = openPositions
+      ? `Open Positions: Long ${openPositions.totalLongPct}% vs Short ${openPositions.totalShortPct}% [${openPositions.dominantSide}] | Dekat Spot (±$25): Long ${openPositions.nearLongPct}% vs Short ${openPositions.nearShortPct}%`
+      : 'Open Positions: N/A';
+
+    const ordText = pendingOrders
+      ? `Pending Orders (±$25): BuyLimit=${pendingOrders.buyLimitBelowPct}% (Support: ${fmtClusters(
+          pendingOrders.topBuyLimitsBelow,
+          'buy'
+        )}) | SellLimit=${pendingOrders.sellLimitAbovePct}% (Resist: ${fmtClusters(
+          pendingOrders.topSellLimitsAbove,
+          'sell'
+        )}) | BuyStop Above=${pendingOrders.buyStopAbovePct}% (${fmtClusters(
+          pendingOrders.topBuyStopsAbove,
+          'buy'
+        )}) | SellStop Below=${pendingOrders.sellStopBelowPct}% (${fmtClusters(
+          pendingOrders.topSellStopsBelow,
+          'sell'
+        )})`
+      : 'Pending Orders: N/A';
+
+    const summary = `Spot Ref ${currentPrice ?? 'N/A'} | ${
+      openPositions
+        ? `OpenPos Long ${openPositions.totalLongPct}% / Short ${openPositions.totalShortPct}% (${openPositions.dominantSide})`
+        : 'OpenPos N/A'
+    } | ${
+      pendingOrders
+        ? `Pending ±$25: BuyLimit ${pendingOrders.buyLimitBelowPct}% vs SellLimit ${pendingOrders.sellLimitAbovePct}% (Bias ${orderBookBias})`
+        : 'Pending N/A'
+    }`;
+
+    const promptBlock = [
+      `Sumber Resmi: ${sourceUrl} (XAUUSD Live Order & Position Book, Update: ${updatedAtIso ?? 'Real-Time'}, Spot Ref FastBull=${currentPrice ?? 'N/A'})`,
+      `- ${posText}`,
+      `- ${ordText}`,
+      `- Bias Orderbook ±$25: ${orderBookBias}${
+        openPositions?.dominantSide === 'CROWDED_LONG'
+          ? ' | PERINGATAN CROWDED LONG (>68% ritel Long): waspadai sapuan likuiditas / stop-hunt ke cluster SellStop di bawah harga!'
+          : openPositions?.dominantSide === 'CROWDED_SHORT'
+          ? ' | PERINGATAN CROWDED SHORT (>68% ritel Short): waspadai short-squeeze ke cluster BuyStop di atas harga!'
+          : ''
+      }`,
+    ].join('\n');
+
+    const data: FastBullListPositionContext = {
+      available: true,
+      sourceUrl,
+      currentPrice,
+      updatedAtIso,
+      openPositions,
+      pendingOrders,
+      orderBookBias,
+      summary,
+      promptBlock,
+    };
+    fastBullPositionCache = { data, fetchedAt: Date.now() };
+    return data;
+  } catch {
+    const fallback: FastBullListPositionContext = {
+      available: false,
+      sourceUrl,
+      currentPrice: null,
+      updatedAtIso: null,
+      openPositions: null,
+      pendingOrders: null,
+      orderBookBias: 'NEUTRAL',
+      summary: 'FastBull list-position sedang tidak merespons (gunakan feed utama + global sync).',
+      promptBlock: `Sumber: ${sourceUrl} — sementara tidak merespons; tetap prioritaskan peta S/R & order flow lokal.`,
+    };
+    fastBullPositionCache = { data: fallback, fetchedAt: Date.now() };
+    return fallback;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 interface GlobalSyncContext {
   consensusMid: number;
   maxDeviationUsd: number;
@@ -2612,7 +3117,10 @@ interface GlobalSyncContext {
 
 let globalSyncCache: { data: GlobalSyncContext; fetchedAt: number; refMid: number } | null = null;
 
-async function fetchGlobalXauSyncContext(primaryQuote: MarketQuote): Promise<GlobalSyncContext> {
+async function fetchGlobalXauSyncContext(
+  primaryQuote: MarketQuote,
+  fastBullSpot?: number | null
+): Promise<GlobalSyncContext> {
   if (
     globalSyncCache &&
     Date.now() - globalSyncCache.fetchedAt < 12_000 &&
@@ -2630,6 +3138,9 @@ async function fetchGlobalXauSyncContext(primaryQuote: MarketQuote): Promise<Glo
   const quotes: Array<{ source: string; mid: number }> = [
     { source: primaryQuote.source, mid: primaryQuote.mid },
   ];
+  if (fastBullSpot && fastBullSpot > 1000) {
+    quotes.push({ source: 'FastBull (list-position XAUUSD)', mid: Number(fastBullSpot.toFixed(2)) });
+  }
   if (yahooSpot.price && yahooSpot.price > 1000) {
     quotes.push({ source: 'Yahoo Spot (XAUUSD=X)', mid: Number(yahooSpot.price.toFixed(2)) });
   }
@@ -2783,15 +3294,22 @@ async function startServer() {
       openRouterDecisionModels: [
         openrouter?.respanModel ?? 'respan/span-01-lite:free',
         openrouter?.model ?? 'perplexity/pplx-decider-flash-v1.3:free',
+        openrouter?.lingDtModel ?? 'antdigital/lingdt-decision-fast-1.0:free',
+        openrouter?.clefModel ?? 'cloudflare/clef-flash',
+        openrouter?.pplxV12Model ?? 'perplexity/pplx-decider-v1.2',
         openrouter?.heygenModel ?? 'heygen/heygen-decision-1-turbo',
         openrouter?.drexModel ?? 'nace-ai/drex-max',
         openrouter?.jevModel ?? 'typesafe/jev-1.14',
       ],
       openRouterChatModels: [
+        openrouter?.lingModel ?? 'inclusionai/ling-3.2-flash:free',
+        openrouter?.ernieModel ?? 'baidu/ernie-5.5-flash-preview:free',
+        openrouter?.lfmModel ?? 'liquid/lfm-3-1.7b:free',
         openrouter?.argonModel ?? 'google/gemini-4-argon',
         openrouter?.hydrogenModel ?? 'google/gemini-4-hydrogen',
         openrouter?.nemotronModel ?? 'nvidia/nemotron-3-ultra-550b-a55b:free',
         openrouter?.kimiModel ?? 'moonshotai/kimi-k3.1-pro',
+        openrouter?.gptOssModel ?? 'openai/gpt-oss-20b',
       ],
       defaultThinkingLevel: 'HIGH',
       timestamp: Date.now(),
@@ -3198,6 +3716,16 @@ async function startServer() {
     }
   });
 
+  app.get('/api/market/fastbull-position', async (_req, res) => {
+    try {
+      const fb = await fetchFastBullListPositionXauusd();
+      res.json(fb);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gagal memuat FastBull list-position.';
+      res.status(502).json({ error: message });
+    }
+  });
+
   app.get('/api/market/candles', async (req, res) => {
     try {
       const brokerId = normalizeBrokerId(req.query.broker);
@@ -3278,6 +3806,7 @@ async function startServer() {
         chartImageBase64?: string;
         uploadedChartImageBase64?: string;
         strategyFocus?:
+          | 'UNIFIED_8IN1'
           | 'ADAPTIVE_SCALP'
           | 'BALANCED'
           | 'SCALPING_EMA'
@@ -3287,6 +3816,15 @@ async function startServer() {
         timeframe?: ChartTimeframe;
         riskPercent?: number;
         accountBalance?: number;
+        eaLotParams?: {
+          lotMode?: 'RISK_PERCENT' | 'FIXED_LOT';
+          fixedLot?: number;
+          riskPercent?: number;
+          martingaleEnabled?: boolean;
+          martingaleMultiplier?: number;
+          mathRecoveryEnabled?: boolean;
+          mathRecoveryMaxSteps?: number;
+        };
         openPositionsCount?: number;
         openPositionsSummary?: string;
         openPositionsDetail?: Array<{
@@ -3314,11 +3852,20 @@ async function startServer() {
       const validProviders: AiProviderMode[] = [
         'AUTO',
         'ROUND_ROBIN',
+        'OPENROUTER_GEMMA_PPLX_CONSENSUS',
+        'OPENROUTER_CLEF_PPLX12_CONSENSUS',
+        'OPENROUTER_CLEF_PPLX12_GPTOSS_CONSENSUS',
+        'OPENROUTER_SPAN_PPLX_LINGDT_CONSENSUS',
         'OPENROUTER_RESPAN_PPLX',
+        'OPENROUTER_FLASH_TRIO',
         'GEMINI',
         'AIRFORCE',
         'OPENROUTER',
+        'OPENROUTER_CLEF',
+        'OPENROUTER_PPLX_V12',
         'OPENROUTER_RESPAN',
+        'OPENROUTER_LINGDT',
+        'OPENROUTER_GPT_OSS',
         'OPENROUTER_HEYGEN',
         'OPENROUTER_DREX',
         'OPENROUTER_JEV',
@@ -3327,8 +3874,16 @@ async function startServer() {
         'OPENROUTER_HYDROGEN',
         'OPENROUTER_NEMOTRON',
         'OPENROUTER_KIMI',
+        'OPENROUTER_LING',
+        'OPENROUTER_ERNIE',
+        'OPENROUTER_LFM',
       ];
-      const requestedRaw = String(body.aiProvider || 'AUTO').toUpperCase().trim() as AiProviderMode;
+      const requestedRawUpper = String(body.aiProvider || 'AUTO').toUpperCase().trim();
+      const requestedRaw = (
+        requestedRawUpper === 'OPENROUTER_ERNIE_PPLX_CONSENSUS'
+          ? 'OPENROUTER_GEMMA_PPLX_CONSENSUS'
+          : requestedRawUpper
+      ) as AiProviderMode;
       requestedProvider = validProviders.includes(requestedRaw) ? requestedRaw : 'AUTO';
       const thinkingHigh = body.aiThinkingHigh ?? true;
 
@@ -3442,6 +3997,8 @@ async function startServer() {
         ind.ema9 !== null && ind.ema21 !== null ? Number((ind.ema9 - ind.ema21).toFixed(2)) : null;
 
       const strategyInstructionMap: Record<string, string> = {
+        UNIFIED_8IN1:
+          'MODE TERPADU 11 PILAR COMPLETE (8-IN-1 + HARMONIC + LSTM + PRICE ACTION) — KHUSUS ULTRA-SCALPING: Tujuan TUNGGAL adalah ULTRA-SCALPING cepat (fokus 90 detik ke depan, TP ≤ 5-30 menit, DILARANG swing atau intraday), beroperasi dengan Protokol Sinkronisasi Ganda (OCR chart + harga global real-time) dan Mode "Predatory Surveillance & Predatory Standby" (mengintai likuiditas secara senyap, tahan HOLD saat belum konfluen penuh, hanya menerkam BUY/SELL saat seluruh 11 pilar—8 metode scalping + Harmonic X-A-B-C-D + Probabilitas LSTM mandiri + Price Action murni—sepakat searah tanpa tembok S/R penghalang).',
         ADAPTIVE_SCALP:
           'MODE GABUNGAN AUTO ADAPTIVE (TARGET WINRATE ≥90% & PROFITABLE): EA/AI wajib memilih sendiri secara dinamis apakah kondisi pasar saat ini paling cocok memakai (A) Scalping Momentum M5 (EMA 9/21/50 searah + Tight ATR saat tren bersih & ADX mendukung) ATAU (B) Ultra-Scalping M1+M5 Sniper Breakout (saat breakout kompresi / sweep likuiditas + konfirmasi micro candle & penolakan S/R). WAJIB selektif ala sniper: hanya eksekusi BUY/SELL bila peluang win estimasi ≥90% dan jalur ke TP1 bebas dari tembok S/R penghalang; jika struktur choppy/meragukan/di bawah 90%, wajib pilih HOLD demi menjaga winrate tinggi dan profitabilitas. Sebutkan mode yang dipilih ([Momentum M5] atau [Sniper M1+M5]) pada setupPattern & judgeVerdict.',
         BALANCED:
@@ -3454,8 +4011,10 @@ async function startServer() {
           'Preferensi Horizon: Price Action / Likuiditas. AI bebas membaca reaksi harga di area likuiditas secara mandiri dan mengambil keputusan BUY, SELL, atau HOLD meskipun indikator menunjukkan arah berlawanan.',
       };
 
-      const strategyFocus = body.strategyFocus || 'ADAPTIVE_SCALP';
+      const strategyFocus = body.strategyFocus || 'UNIFIED_8IN1';
+      const isUltraUnified = strategyFocus === 'UNIFIED_8IN1';
       const isScalpMode =
+        isUltraUnified ||
         strategyFocus === 'ADAPTIVE_SCALP' ||
         strategyFocus === 'SCALPING_EMA' ||
         strategyFocus === 'ULTRA_SCALP';
@@ -3470,10 +4029,14 @@ async function startServer() {
         typeof body.mt5SpreadPoints === 'number'
           ? `${snapshot.quote.spread} USD (${body.mt5SpreadPoints} pts MT5)`
           : `${snapshot.quote.spread} USD`;
-      const slGuide = isScalpMode
+      const slGuide = isUltraUnified
+        ? `${(atrValue * 0.8).toFixed(2)} - ${(atrValue * 1.0).toFixed(2)}`
+        : isScalpMode
         ? `${(atrValue * 0.95).toFixed(2)} - ${(atrValue * 1.15).toFixed(2)}`
         : `${(atrValue * 1.3).toFixed(2)} - ${(atrValue * 1.7).toFixed(2)}`;
-      const tpGuide = isScalpMode
+      const tpGuide = isUltraUnified
+        ? `${(atrValue * 1.0).toFixed(2)} - ${(atrValue * 1.35).toFixed(2)} (Ultra-Scalp cepat <=30m)`
+        : isScalpMode
         ? `${(atrValue * 1.25).toFixed(2)} - ${(atrValue * 1.6).toFixed(2)}`
         : `${(atrValue * 1.8).toFixed(2)} - ${(atrValue * 2.5).toFixed(2)}`;
 
@@ -3524,6 +4087,7 @@ ATURAN KETAT PENILAIAN POSISI TERBUKA (AI EXIT JUDGE — positionDecision), MART
     2) Ada indikasi jelas harga akan berubah arah melawan posisi dengan keyakinan minimal 80% (\`reversalConfidence >= 80\`).
   * Jika \`winProbability >= 20\` ATAU \`reversalConfidence < 80\`, WAJIB isi \`positionDecision\` = \`"KEEP"\` agar TP bekerja dan tidak cut-loss prematur saat pullback minor.
   * Pilih \`"CLOSE_ALL"\` ketika kedua syarat ketat tersebut (\`winProbability < 20\` & \`reversalConfidence >= 80\`) terpenuhi.
+  * PROTOKOL MATEMATIKAL RECOVERY 100% SAAT INVALID / BERBALIK ARAH: Jika Anda memilih \`CLOSE_ALL\` / \`CLOSE_BUY\` / \`CLOSE_SELL\` karena prediksi sebelumnya invalid dan harga sudah berbalik arah (≥80%), evaluasi apakah arah pembalikan yang baru sudah bersih untuk langsung dieksekusi Martil Recovery. Jika sudah bersih & terkonfirmasi, langsung keluarkan \`signal\` arah baru tersebut (\`BUY\` atau \`SELL\`) agar EA melakukan **Close + Reversal Martil Recovery** dengan target TP matematis 100% pulih. Jika belum bersih/menunggu pullback, keluarkan \`HOLD\`.
 - ATURAN BUKA POSISI SAMA / MARTIL SEARAH & ANTI-KONTRADIKSI:
   * Selama masih ada posisi \`SELL\` terbuka yang diputuskan \`KEEP\`, Anda DILARANG KERAS mengeluarkan \`signal = "BUY"\` (wajib \`HOLD\` atau \`SELL\` jika memenuhi syarat Martil).
   * Selama masih ada posisi \`BUY\` terbuka yang diputuskan \`KEEP\`, Anda DILARANG KERAS mengeluarkan \`signal = "SELL"\` (wajib \`HOLD\` atau \`BUY\` jika memenuhi syarat Martil).
@@ -3612,11 +4176,15 @@ ATURAN BERPIKIR SITUASIONAL PASCA-TP (WAJIB DIPATUHI):
         ind.structure ?? analyzeChartStructure(snapshot.candles, atrValue);
 
       const brokerIdForMtf = normalizeBrokerId(body.brokerFeed);
-      const [macroContext, globalSync, mtfData] = await Promise.all([
+      const [macroContext, fastBullPosition, mtfData] = await Promise.all([
         fetchMacroAndGeopoliticsContext(),
-        fetchGlobalXauSyncContext(snapshot.quote),
+        fetchFastBullListPositionXauusd(),
         fetchMultiTimeframeSummary(brokerIdForMtf, requestedTf, snapshot),
       ]);
+      const globalSync = await fetchGlobalXauSyncContext(
+        snapshot.quote,
+        fastBullPosition.currentPrice
+      );
 
       const resistanceLines =
         chartStructure.resistances.length > 0
@@ -3702,6 +4270,10 @@ ${
 }`
           : '\nSELF-AUDIT KESALAHAN TERDAHULU: Belum ada riwayat trade tertutup terbaru; tetap terapkan disiplin ketat tanpa asumsi.';
 
+      const harmonicLine = chartStructure.harmonicPattern
+        ? `${chartStructure.harmonicPattern.direction} ${chartStructure.harmonicPattern.name} (${chartStructure.harmonicPattern.status}) | X=${chartStructure.harmonicPattern.xPrice} → A=${chartStructure.harmonicPattern.aPrice} → B=${chartStructure.harmonicPattern.bPrice} → C=${chartStructure.harmonicPattern.cPrice} → D=${chartStructure.harmonicPattern.dPrice} | PRZ=[${chartStructure.harmonicPattern.przLow}-${chartStructure.harmonicPattern.przHigh}] | Rasio: ${chartStructure.harmonicPattern.ratiosSummary} | Target Harmonic: TP1=${chartStructure.harmonicPattern.target1}, TP2=${chartStructure.harmonicPattern.target2}, Invalidasi=${chartStructure.harmonicPattern.invalidation}`
+        : 'Belum ada pola Harmonic X-A-B-C-D (Gartley/Bat/Butterfly/Crab/Cypher/AB=CD) yang aktif di PRZ saat ini';
+
       const structureSection = `PETA SUPPORT, RESISTANCE, STRUKTUR HARGA & POLA CHART (WAJIB DIBACA AGAR TIDAK BUTA HARGA):
 - Struktur Pasar (${tfLabel}): ${chartStructure.marketStructure} -> ${chartStructure.structureSummary}
 - Posisi Harga Terhadap S/R Terdekat: ${chartStructure.pricePositionNote}
@@ -3711,6 +4283,7 @@ ${resistanceLines}
 ${supportLines}
 - Level Kunci Tambahan: Pivot Point=${chartStructure.pivotPoint ?? 'N/A'} | Session High=${chartStructure.sessionHigh.toFixed(2)} | Session Low=${chartStructure.sessionLow.toFixed(2)} | Angka Psikologis: ${chartStructure.roundLevels.join(', ')}
 - Fibonacci Retracement & Extension: ${fiboLine}
+- Harmonic Pattern Trading (X-A-B-C-D): ${harmonicLine}
 - Pola Chart Makro Terdeteksi (20-50 candle): ${
         chartStructure.chartPatterns.length > 0
           ? chartStructure.chartPatterns.join(' | ')
@@ -3726,8 +4299,284 @@ ATURAN MEMBACA PETA HARGA & S/R:
 * Jangan pernah entry "buta" menabrak tembok: hindari BUY tepat di bawah Resistance kuat (jarak < 0.35 ATR) kecuali sudah terjadi candle breakout/acceptance yang valid, dan hindari SELL tepat di atas Support kuat tanpa breakdown valid.
 * Manfaatkan pantulan/rejection di Support/Resistance (misalnya Pin Bar, Engulfing, atau Liquidity Sweep di S1/R1) serta targetkan Take Profit di dekat level S/R atau zona likuiditas berikutnya.`;
 
+      type PillarVote = 'BUY' | 'SELL' | 'NEUTRAL';
+      interface UnifiedPillar {
+        id: number;
+        name: string;
+        vote: PillarVote;
+        detail: string;
+      }
+
+      const buildUnified8In1Matrix = () => {
+        const candles = snapshot.candles;
+        const n = candles.length;
+        const cNow = candles[n - 1];
+        const cPrev = candles[n - 2] ?? cNow;
+        const prev6 = candles.slice(Math.max(0, n - 7), n - 1);
+        const prev6High = prev6.length ? Math.max(...prev6.map((c) => c.high)) : cNow.high;
+        const prev6Low = prev6.length ? Math.min(...prev6.map((c) => c.low)) : cNow.low;
+        const prev6Range = prev6High - prev6Low;
+
+        // 1. Sniper Compression Breakout (M1 + M5)
+        let p1Vote: PillarVote = 'NEUTRAL';
+        let p1Detail = `Range 6-bar ${prev6Range.toFixed(2)} USD belum breakout bersih`;
+        const nowBody = Math.abs(cNow.close - cNow.open);
+        const nowRange = Math.max(0.01, cNow.high - cNow.low);
+        const m1MicroList = Array.isArray(body.mt5M1Candles) ? body.mt5M1Candles.slice(-3) : [];
+        const m1BullCount = m1MicroList.filter((m) => m.close > m.open).length;
+        const m1BearCount = m1MicroList.filter((m) => m.close < m.open).length;
+        if (cNow.close > prev6High && nowBody / nowRange >= 0.45 && (m1MicroList.length === 0 || m1BullCount >= 2)) {
+          p1Vote = 'BUY';
+          p1Detail = `Breakout atas range 6-bar (${prev6High.toFixed(2)}) terkonfirmasi body ${Math.round((nowBody / nowRange) * 100)}%`;
+        } else if (cNow.close < prev6Low && nowBody / nowRange >= 0.45 && (m1MicroList.length === 0 || m1BearCount >= 2)) {
+          p1Vote = 'SELL';
+          p1Detail = `Breakdown bawah range 6-bar (${prev6Low.toFixed(2)}) terkonfirmasi body ${Math.round((nowBody / nowRange) * 100)}%`;
+        } else if (prev6Range <= atrValue * 1.35) {
+          p1Detail = `Kompresi ketat (${prev6Range.toFixed(2)} USD <= 1.35 ATR) — siap tunggu breakout`;
+        }
+
+        // 2. Momentum Pullback (EMA 9/21/50 + Tight ATR)
+        let p2Vote: PillarVote = 'NEUTRAL';
+        let p2Detail = 'EMA9/21/50 datar atau saling silang';
+        const adxVal = ind.adx14 ?? 18;
+        if (ind.ema9 !== null && ind.ema21 !== null && ind.ema50 !== null) {
+          if (ind.ema9 > ind.ema21 && ind.ema21 > ind.ema50 && (ema9Slope ?? 0) > 0 && adxVal >= 18) {
+            p2Vote = 'BUY';
+            p2Detail = `EMA9(${ind.ema9}) > EMA21(${ind.ema21}) > EMA50(${ind.ema50}), Slope +${ema9Slope}, ADX ${adxVal}`;
+          } else if (ind.ema9 < ind.ema21 && ind.ema21 < ind.ema50 && (ema9Slope ?? 0) < 0 && adxVal >= 18) {
+            p2Vote = 'SELL';
+            p2Detail = `EMA9(${ind.ema9}) < EMA21(${ind.ema21}) < EMA50(${ind.ema50}), Slope ${ema9Slope}, ADX ${adxVal}`;
+          } else {
+            p2Detail = `EMA9=${ind.ema9}/21=${ind.ema21}/50=${ind.ema50}, ADX=${adxVal} (belum searah penuh)`;
+          }
+        }
+
+        // 3. Liquidity Sweep & Stop-Hunt Reversal (SMC)
+        let p3Vote: PillarVote = 'NEUTRAL';
+        let p3Detail = 'Belum ada sweep likuiditas ekstrim';
+        const lwNow = Math.min(cNow.open, cNow.close) - cNow.low;
+        const uwNow = cNow.high - Math.max(cNow.open, cNow.close);
+        const lwPrev = Math.min(cPrev.open, cPrev.close) - cPrev.low;
+        const uwPrev = cPrev.high - Math.max(cPrev.open, cPrev.close);
+        const bullSweep =
+          (cNow.low < prev6Low && cNow.close > prev6Low && lwNow > nowBody * 1.2) ||
+          (cPrev.low < prev6Low && cPrev.close > prev6Low && lwPrev > Math.abs(cPrev.close - cPrev.open) * 1.2);
+        const bearSweep =
+          (cNow.high > prev6High && cNow.close < prev6High && uwNow > nowBody * 1.2) ||
+          (cPrev.high > prev6High && cPrev.close < prev6High && uwPrev > Math.abs(cPrev.close - cPrev.open) * 1.2);
+        if (bullSweep && !bearSweep) {
+          p3Vote = 'BUY';
+          p3Detail = `Bullish Liquidity Sweep di bawah ${prev6Low.toFixed(2)} + rejection wick`;
+        } else if (bearSweep && !bullSweep) {
+          p3Vote = 'SELL';
+          p3Detail = `Bearish Liquidity Sweep di atas ${prev6High.toFixed(2)} + rejection wick`;
+        } else if (chartStructure.marketStructure === 'UPTREND_HH_HL') {
+          p3Vote = 'BUY';
+          p3Detail = 'Struktur SMC UPTREND_HH_HL menjaga aliran likuiditas naik';
+        } else if (chartStructure.marketStructure === 'DOWNTREND_LH_LL') {
+          p3Vote = 'SELL';
+          p3Detail = 'Struktur SMC DOWNTREND_LH_LL menjaga aliran likuiditas turun';
+        }
+
+        // 4. Support/Resistance & Round-Number Rejection
+        let p4Vote: PillarVote = 'NEUTRAL';
+        let p4Detail = 'Harga di tengah zona S/R';
+        const nearS = chartStructure.nearestSupport;
+        const nearR = chartStructure.nearestResistance;
+        const buyBlockedByRes = Boolean(nearR && nearR.distanceAtr < 0.35);
+        const sellBlockedBySup = Boolean(nearS && nearS.distanceAtr < 0.35);
+        if (nearS && nearS.distanceAtr <= 0.55 && cNow.close >= cNow.open && !buyBlockedByRes) {
+          p4Vote = 'BUY';
+          p4Detail = `Pantulan dekat Support ${nearS.price.toFixed(2)} (${nearS.distanceAtr} ATR), ruang ke R1 aman`;
+        } else if (nearR && nearR.distanceAtr <= 0.55 && cNow.close <= cNow.open && !sellBlockedBySup) {
+          p4Vote = 'SELL';
+          p4Detail = `Penolakan dekat Resistance ${nearR.price.toFixed(2)} (${nearR.distanceAtr} ATR), ruang ke S1 aman`;
+        } else if (buyBlockedByRes || sellBlockedBySup) {
+          p4Detail = buyBlockedByRes
+            ? `Waspada atap Resistance dekat (${nearR!.price.toFixed(2)}, ${nearR!.distanceAtr} ATR)`
+            : `Waspada lantai Support dekat (${nearS!.price.toFixed(2)}, ${nearS!.distanceAtr} ATR)`;
+        }
+
+        // 5. Fair Value Gap (FVG) / Imbalance Scalp
+        let p5Vote: PillarVote = 'NEUTRAL';
+        let p5Detail = 'Tidak ada FVG aktif di sekitar harga';
+        const nearFvg = chartStructure.fvgZones.find(
+          (f) => snapshot.quote.mid >= f.low - atrValue * 0.4 && snapshot.quote.mid <= f.high + atrValue * 0.4
+        );
+        if (nearFvg) {
+          p5Vote = nearFvg.type === 'BULLISH_FVG' ? 'BUY' : 'SELL';
+          p5Detail = `Retest ${nearFvg.type} [${nearFvg.low.toFixed(2)}-${nearFvg.high.toFixed(2)}]`;
+        }
+
+        // 6. Fibonacci Micro-Retracement & Extension
+        let p6Vote: PillarVote = 'NEUTRAL';
+        let p6Detail = 'Harga belum di zona retracement Fibonacci 38.2%-78.6%';
+        if (ind.fibonacci) {
+          const mid = snapshot.quote.mid;
+          const inGolden =
+            mid >= Math.min(ind.fibonacci.r382, ind.fibonacci.r786) - atrValue * 0.2 &&
+            mid <= Math.max(ind.fibonacci.r382, ind.fibonacci.r786) + atrValue * 0.2;
+          if (inGolden) {
+            p6Vote = ind.fibonacci.trend === 'UP' ? 'BUY' : 'SELL';
+            p6Detail = `Zona retracement sehat Fibo ${ind.fibonacci.trend} (38.2=${ind.fibonacci.r382}..61.8=${ind.fibonacci.r618})`;
+          }
+        }
+
+        // 7. Order Flow, FastBull Position/Order Book, Tick Velocity & Volume Confirmation (OBV + Delta)
+        let p7Vote: PillarVote = 'NEUTRAL';
+        let p7Detail = 'Arus order & OBV berimbang';
+        const last3 = candles.slice(-3);
+        const bullVol = last3.reduce((s, c) => s + (c.close >= c.open ? c.volume : 0), 0);
+        const bearVol = last3.reduce((s, c) => s + (c.close < c.open ? c.volume : 0), 0);
+        const fbOrderBias = fastBullPosition.available ? fastBullPosition.orderBookBias : 'NEUTRAL';
+        if (ind.obvTrend === 'ACCUMULATION' && bullVol >= bearVol && fbOrderBias !== 'SELL') {
+          p7Vote = 'BUY';
+          p7Detail = `OBV ACCUMULATION + volume buyer (${bullVol} vs ${bearVol}) + FastBull OrderBook=${fbOrderBias}`;
+        } else if (ind.obvTrend === 'DISTRIBUTION' && bearVol >= bullVol && fbOrderBias !== 'BUY') {
+          p7Vote = 'SELL';
+          p7Detail = `OBV DISTRIBUTION + volume seller (${bearVol} vs ${bullVol}) + FastBull OrderBook=${fbOrderBias}`;
+        } else if (fbOrderBias !== 'NEUTRAL') {
+          p7Detail = `OBV=${ind.obvTrend} bertolak belakang/netral vs FastBull OrderBook=${fbOrderBias}`;
+        }
+
+        // 8. Session Open & DXY Inverse-Correlation Scalp
+        let p8Vote: PillarVote = 'NEUTRAL';
+        const utcHour = new Date().getUTCHours();
+        const sessionLabel =
+          utcHour >= 12 && utcHour <= 16
+            ? 'London/NY Overlap (Likuiditas Puncak)'
+            : utcHour >= 7 && utcHour < 12
+            ? 'Sesi London'
+            : utcHour > 16 && utcHour <= 21
+            ? 'Sesi New York'
+            : 'Sesi Asia (Range)';
+        if (macroContext.dxyBias === 'MELEMAH') {
+          p8Vote = 'BUY';
+        } else if (macroContext.dxyBias === 'MENGUAT') {
+          p8Vote = 'SELL';
+        }
+        const p8Detail = `${sessionLabel} | DXY ${macroContext.dxyBias} (${macroContext.dxyChangePct ?? 'N/A'}%)`;
+
+        // 9. Harmonic Pattern Trading (X-A-B-C-D & PRZ)
+        let p9Vote: PillarVote = 'NEUTRAL';
+        let p9Detail = 'Belum terbentuk pola Harmonic X-A-B-C-D valid di PRZ saat ini';
+        const hp = chartStructure.harmonicPattern;
+        if (hp) {
+          const reactedBull = hp.direction === 'BULLISH' && cNow.close >= cNow.open;
+          const reactedBear = hp.direction === 'BEARISH' && cNow.close <= cNow.open;
+          if (hp.status === 'AT_PRZ' || hp.status === 'COMPLETED') {
+            if (hp.direction === 'BULLISH' && (reactedBull || cNow.low <= hp.przHigh)) {
+              p9Vote = 'BUY';
+            } else if (hp.direction === 'BEARISH' && (reactedBear || cNow.high >= hp.przLow)) {
+              p9Vote = 'SELL';
+            }
+          }
+          p9Detail = `${hp.direction} ${hp.name} (${hp.status}) PRZ [${hp.przLow}-${hp.przHigh}] | ${hp.ratiosSummary} | TP1=${hp.target1}`;
+        }
+
+        // 10. Probabilitas Sekuens LSTM Kuantitatif (Kalibrasi Sekuens + Order Flow)
+        let p10Vote: PillarVote = 'NEUTRAL';
+        const seqSlopeUp =
+          (cNow.close - candles[Math.max(0, n - 6)].close) / Math.max(0.2, atrValue);
+        const seqSlope12 =
+          (cNow.close - candles[Math.max(0, n - 13)].close) / Math.max(0.2, atrValue);
+        let seqUp = 33;
+        let seqDown = 33;
+        if (seqSlopeUp > 0.35 && seqSlope12 > 0 && p7Vote !== 'SELL') {
+          seqUp = Math.min(82, Math.round(52 + Math.min(25, seqSlopeUp * 12)));
+          seqDown = Math.max(8, Math.round((100 - seqUp) * 0.45));
+          p10Vote = 'BUY';
+        } else if (seqSlopeUp < -0.35 && seqSlope12 < 0 && p7Vote !== 'BUY') {
+          seqDown = Math.min(82, Math.round(52 + Math.min(25, Math.abs(seqSlopeUp) * 12)));
+          seqUp = Math.max(8, Math.round((100 - seqDown) * 0.45));
+          p10Vote = 'SELL';
+        }
+        const seqHold = Math.max(0, 100 - seqUp - seqDown);
+        const p10Detail = `Baseline Sekuens Z-ATR(5/12)=${seqSlopeUp.toFixed(2)}/${seqSlope12.toFixed(2)} -> Estimasi awal Up=${seqUp}% Down=${seqDown}% Hold=${seqHold}% (AI wajib menghitung ulang sendiri \`lstmProbability\`)`;
+
+        // 11. Price Action Trading Murni (Candlestick Rejection, Engulfing, Inside Bar Break & Swing HH-HL/LH-LL)
+        let p11Vote: PillarVote = 'NEUTRAL';
+        const paPatterns = chartStructure.candlestickPatterns;
+        const hasBullPaPat = paPatterns.some((p) => /Bullish Pin Bar|Bullish Engulfing|Bullish Momentum/i.test(p));
+        const hasBearPaPat = paPatterns.some((p) => /Bearish Pin Bar|Bearish Engulfing|Bearish Momentum/i.test(p));
+        const cPrev2 = candles[Math.max(0, n - 3)] ?? cPrev;
+        const paBodyRatio = nowBody / nowRange;
+        const bullImpulse = cNow.close > cPrev.high && cNow.close > cNow.open && paBodyRatio >= 0.45;
+        const bearImpulse = cNow.close < cPrev.low && cNow.close < cNow.open && paBodyRatio >= 0.45;
+        const bullInsideBreak = cPrev.high <= cPrev2.high && cPrev.low >= cPrev2.low && cNow.close > cPrev.high;
+        const bearInsideBreak = cPrev.high <= cPrev2.high && cPrev.low >= cPrev2.low && cNow.close < cPrev.low;
+        const bullStructOk = chartStructure.marketStructure === 'UPTREND_HH_HL' || /Bullish Breakout|Bullish CHoCH/i.test(chartStructure.structureSummary);
+        const bearStructOk = chartStructure.marketStructure === 'DOWNTREND_LH_LL' || /Bearish Breakdown|Bearish CHoCH/i.test(chartStructure.structureSummary);
+
+        if ((hasBullPaPat || bullInsideBreak || (bullImpulse && bullStructOk)) && !hasBearPaPat && !bearImpulse) {
+          p11Vote = 'BUY';
+        } else if ((hasBearPaPat || bearInsideBreak || (bearImpulse && bearStructOk)) && !hasBullPaPat && !bullImpulse) {
+          p11Vote = 'SELL';
+        }
+        const paPatText = paPatterns.length > 0 ? paPatterns.join(', ') : 'Candle reguler';
+        const p11Detail = `${chartStructure.marketStructure} | Pola PA: ${paPatText} | BodyRatio=${Math.round(paBodyRatio * 100)}% (${cNow.close >= cNow.open ? 'Bull' : 'Bear'})`;
+
+        const pillars: UnifiedPillar[] = [
+          { id: 1, name: 'Sniper Breakout M1+M5', vote: p1Vote, detail: p1Detail },
+          { id: 2, name: 'Momentum EMA9/21/50 + ATR', vote: p2Vote, detail: p2Detail },
+          { id: 3, name: 'Liquidity Sweep SMC', vote: p3Vote, detail: p3Detail },
+          { id: 4, name: 'S/R & Round-Number', vote: p4Vote, detail: p4Detail },
+          { id: 5, name: 'Fair Value Gap (FVG)', vote: p5Vote, detail: p5Detail },
+          { id: 6, name: 'Fibonacci Micro', vote: p6Vote, detail: p6Detail },
+          { id: 7, name: 'Order Flow & OBV Volume', vote: p7Vote, detail: p7Detail },
+          { id: 8, name: 'Session & DXY Invers', vote: p8Vote, detail: p8Detail },
+          { id: 9, name: 'Harmonic Pattern (XABCD)', vote: p9Vote, detail: p9Detail },
+          { id: 10, name: 'Sekuens LSTM & AI Prob', vote: p10Vote, detail: p10Detail },
+          { id: 11, name: 'Price Action Trading', vote: p11Vote, detail: p11Detail },
+        ];
+
+        const buyVotes = pillars.filter((x) => x.vote === 'BUY').length;
+        const sellVotes = pillars.filter((x) => x.vote === 'SELL').length;
+        const neutralVotes = pillars.filter((x) => x.vote === 'NEUTRAL').length;
+        const dominantBias: 'BUY' | 'SELL' | 'HOLD' =
+          buyVotes >= 5 && buyVotes >= sellVotes + 2 && !buyBlockedByRes
+            ? 'BUY'
+            : sellVotes >= 5 && sellVotes >= buyVotes + 2 && !sellBlockedBySup
+            ? 'SELL'
+            : 'HOLD';
+
+        return {
+          pillars,
+          buyVotes,
+          sellVotes,
+          neutralVotes,
+          dominantBias,
+          buyBlockedByRes,
+          sellBlockedBySup,
+          paDetail: p11Detail,
+          paVote: p11Vote,
+          summaryLine: `8-in-1 + Harmonic, LSTM & PA Skor: BUY ${buyVotes}/11 | SELL ${sellVotes}/11 | NETRAL ${neutralVotes}/11 -> Bias Pipeline: ${dominantBias}`,
+          promptBlock: pillars
+            .map((p) => `  [${p.id}/11] ${p.name}: ${p.vote} (${p.detail})`)
+            .join('\n'),
+        };
+      };
+
+      const unified8In1 = buildUnified8In1Matrix();
+
       const adaptivePromptRule =
-        strategyFocus === 'ADAPTIVE_SCALP'
+        strategyFocus === 'UNIFIED_8IN1'
+          ? `\nDOKTRIN WAJIB ULTRA-SCALPING (TANPA SWING / TANPA INTRADAY) + PROTOKOL SINKRONISASI GANDA + MODE "PREDATORY SURVEILLANCE & PREDATORY STANDBY":
+- TUJUAN TUNGGAL: Anda beroperasi EXCLUSIVELY untuk ULTRA-SCALPING XAU/USD (fokus eksekusi 90 detik ke depan, target TP1 cepat & realistis ≤ 5–30 menit). DILARANG KERAS mengambil setup atau memasang target jauh bergaya SWING maupun INTRADAY.
+- PROTOKOL SINKRONISASI GANDA: Selalu ekstrak Bid/Ask & sumbu-Y secara visual (OCR), verifikasi dengan Konsensus Harga Global Real-Time (${globalSync.consensusMid}), dan selaraskan selisih spread sebelum menetapkan entry & TP1 ultra-scalp.
+- MODE "PREDATORY SURVEILLANCE & PREDATORY STANDBY":
+  * Predatory Surveillance: Mengintai jejak Smart Money, liquidity sweep, DXY invers, urutan candle kiri-ke-kanan M1+M5, Harmonic PRZ, dan Order Flow secara senyap & teliti.
+  * Predatory Standby: Siaga penuh menahan posisi ("HOLD") bila konfluensi 11 pilar belum matang sempurna, dan hanya menerkam ("BUY"/"SELL") pada titik presisi ultra-scalping bebas hambatan S/R.
+
+MATRIKS PIPELINE TERPADU 11 PILAR COMPLETE (8-IN-1 + HARMONIC, AI LSTM & PRICE ACTION):
+${unified8In1.summaryLine}
+${unified8In1.promptBlock}
+ATURAN EKSEKUSI 11 PILAR ULTRA-SCALPING:
+- Gabungkan seluruh 11 pilar di atas secara berjenjang untuk eksekusi ULTRA-SCALPING cepat: Konteks Makro/Sesi & DXY + Price Action Murni (Pin Bar/Engulfing/Inside Bar Breakout/Swing HH-HL-LH-LL) + Peta S/R, Harmonic Pattern X-A-B-C-D (PRZ), SMC, FVG, Fibo + Trigger Breakout/Momentum M1+M5, Order Flow, dan Probabilitas LSTM.
+- WAJIB HITUNG SENDIRI PROBABILITAS LSTM SEBAGAI AI INDEPENDEN & TRADER ULTRA-SCALPING PROFESIONAL: keluarkan di \`lstmProbability\` (\`upPct\`, \`downPct\`, \`holdPct\` total = 100%, \`horizonMinutes\` WAJIB singkat 5–15 menit untuk ultra-scalping, dan \`rationale\`), serta evaluasi \`priceActionSignal\` dan \`harmonicPattern\`.
+- Keluarkan BUY atau SELL HANYA jika minimal 5 dari 11 pilar searah, mendominasi pihak lawan, jalur TP1 ultra-scalp (sekitar 1.0–1.5 ATR) bebas dari tembok S/R penghalang, struktur Price Action mendukung, DAN probabilitas LSTM mandiri mendukung arah tersebut (\`upPct >= 55%\` untuk BUY atau \`downPct >= 55%\` untuk SELL). Jika belum kompak, choppy, atau LSTM condong \`holdPct\`, tetap dalam mode Predatory Standby (HOLD).
+- Cantumkan status mode & skor pada setupPattern dan judgeVerdict (contoh: "[Predatory Ultra-Scalp 11-Pilar: 7/11 BUY | PA Engulfing | LSTM Up 68% (5m)]").`
+          : strategyFocus === 'ADAPTIVE_SCALP'
           ? `\nATURAN GABUNGAN AUTO ADAPTIVE (TARGET WINRATE ≥90% & PROFITABLE):\n- Anda menggabungkan 2 engine: (A) [Momentum M5] EMA 9/21/50 + Tight ATR, dan (B) [Sniper M1+M5] Ultra-Scalping Sniper Breakout. Pilih otomatis mode yang paling cocok dengan kondisi pasar saat ini.\n- Gunakan [Momentum M5] saat tren bersih (EMA 9/21/50 searah & slope jelas, ADX mendukung, pullback sehat ke EMA9/21).\n- Gunakan [Sniper M1+M5] saat terjadi breakout kompresi / liquidity sweep dengan konfirmasi micro candle & penolakan S/R kunci.\n- WAJIB disiplin target Winrate ≥90%: hanya keluarkan BUY/SELL jika konfluensi sangat solid dan jalur ke TP1 bebas dari tembok S/R penghalang; jika choppy/meragukan, WAJIB jawab HOLD.\n- Sebutkan pilihan mode ([Momentum M5] atau [Sniper M1+M5]) secara eksplisit di setupPattern dan judgeVerdict.`
           : '';
 
@@ -3736,13 +4585,16 @@ PRINSIP KERJA WAJIB AI:
 1. PENGLIHATAN OPTIK OTOMATIS DARI LIVE CHART (OCR & COMPUTER VISION) + SINKRONISASI GANDA:
    - Baca gambar visual live chart yang diambil otomatis (panel Bid/Ask, garis S1/R1, struktur candlestick, dan label harga sumbu-Y), lalu selaraskan dengan Konsensus Harga Global Real-Time di bawah!
    - Protokol Sinkronisasi Global Saat Ini: ${globalSync.summary}
-2. FUNDAMENTAL HARIAN, DXY, SAHAM & GEOPOLITIK REAL-TIME:
+2. CEK REAL-TIME ORDER & POSITION BOOK FASTBULL (https://www.fastbull.com/list-position — PAIR XAUUSD):
+${fastBullPosition.promptBlock}
+   - WAJIB periksa rasio Open Positions (Long vs Short), klaster Buy Limit / Sell Limit (tembok Support/Resistance orderbook), dan klaster Buy Stop / Sell Stop (zona likuiditas / potensi stop-hunt) di atas agar tidak salah perkiraan atau terjebak di kerumunan ritel yang berlawanan dengan Smart Money!
+3. FUNDAMENTAL HARIAN, DXY, SAHAM & GEOPOLITIK REAL-TIME:
 ${macroLines}
    - Selaraskan analisa teknikal dengan arah DXY (korelasi invers), Yield US10Y, S&P 500, dan berita geopolitik di atas.
-3. SELF-AUDIT KESALAHAN TERDAHULU & KEJUJURAN DATA (ANTI-INFLASI CONFIDENCE):
+4. SELF-AUDIT KESALAHAN TERDAHULU & KEJUJURAN DATA (ANTI-INFLASI CONFIDENCE):
    - DILARANG KERAS memberikan angka keyakinan palsu (95%–100% atau 98%) jika pasar sedang ranging, ADX < 20, multi-timeframe bentrok, atau belum ada konfirmasi struktur yang solid.
    - Jika tidak ada konfirmasi kuat, JUJUR keluarkan "HOLD" dengan skor keyakinan realistis (40–68%).
-4. ANALISA LINTAS TIMEFRAME (M5 → M15 → M30 → H1 → H4) & URUTAN CANDLE (KIRI KE KANAN):
+5. ANALISA LINTAS TIMEFRAME (M5 → M15 → M30 → H1 → H4) & URUTAN CANDLE (KIRI KE KANAN):
 ${mtfData.promptBlock}
 
 DATA HARGA PASAR REAL-TIME (UTAMA):
@@ -3787,7 +4639,7 @@ TUGAS KEPUTUSAN MANDIRI AI:
 3. Terapkan KEJUJURAN DATA: jangan pernah memaksakan skor 90–98% jika struktur tidak terkonfirmasi penuh.
 4. Tentukan \`entryPrice\`, \`stopLoss\` (di balik level S/R / batas invalidasi struktur), \`takeProfit1\`, dan \`takeProfit2\` (BUY: stopLoss < entryPrice < takeProfit1 < takeProfit2; SELL: stopLoss > entryPrice > takeProfit1 > takeProfit2).
 5. Jika memilih "HOLD": isi entryPrice dengan harga mid saat ini (${snapshot.quote.mid}).
-6. Isi \`ocrExtractedPrice\`, \`globalSyncSummary\`, \`macroSummary\`, \`mtfSummary\`, \`keyLevelsSummary\`, \`postTpEvaluation\`, \`postTpReason\`, \`judgeVerdict\`, dan \`indicatorWeighting\` dalam Bahasa Indonesia berdasarkan FAKTA data di atas.`;
+6. Isi \`ocrExtractedPrice\`, \`globalSyncSummary\`, \`macroSummary\`, \`mtfSummary\`, \`keyLevelsSummary\`, \`priceActionSignal\`, \`harmonicPattern\`, \`lstmProbability\` (perhitungan probabilitas LSTM mandiri Anda sebagai AI trader profesional: \`upPct\`, \`downPct\`, \`holdPct\`, \`horizonMinutes\`, \`rationale\`), \`postTpEvaluation\`, \`postTpReason\`, \`judgeVerdict\`, dan \`indicatorWeighting\` dalam Bahasa Indonesia berdasarkan FAKTA data di atas.`;
 
       const parts: Array<
         { text: string } | { inlineData: { mimeType: string; data: string } }
@@ -3811,8 +4663,9 @@ TUGAS KEPUTUSAN MANDIRI AI:
       }
       parts.push({ text: promptText });
 
-      const systemInstruction =
-        'Anda adalah Analis & Hakim Keputusan AI Profesional untuk XAU/USD yang jujur terhadap data. Anda WAJIB membaca visual live chart secara otomatis (OCR Bid/Ask & sumbu-Y), menyelaraskan dengan Konsensus Harga Global, memeriksa DXY & berita geopolitik real-time, memetakan S/R + Fibonacci + MTF (M5-H4) dari kiri ke kanan, mengaudit riwayat trade rugi agar tidak terulang, dan DILARANG menggelembungkan confidence (95-98%) bila struktur belum terkonfirmasi penuh. Saat pasca-TP, jangan membuka posisi balik arah spontan tanpa konfirmasi struktur.';
+      const systemInstruction = isUltraUnified
+        ? 'Anda adalah Trader Ultra-Scalping Profesional XAU/USD (KHUSUS ULTRA-SCALPING 90 detik–30 menit; BUKAN swing dan BUKAN intraday) yang beroperasi dalam Protokol Sinkronisasi Ganda dan mode "Predatory Surveillance & Predatory Standby". Anda WAJIB membaca visual live chart (OCR Bid/Ask & sumbu-Y), menyelaraskan dengan Konsensus Harga Global, mengecek data real-time FastBull list-position (XAUUSD Open Positions & Pending Order clusters) agar tidak salah perkiraan/terjebak stop-hunt, memeriksa DXY & berita geopolitik real-time, memetakan S/R + Price Action murni + Harmonic Pattern + 11 Pilar Complete, menghitung Probabilitas LSTM mandiri (horizon 5-15m), mengaudit trade rugi agar tidak terulang, dan DILARANG menggelembungkan confidence (95-98%) bila konfirmasi belum valid—tahan HOLD dalam mode Predatory Standby sampai setup ultra-scalping matang sempurna.'
+        : 'Anda adalah Analis & Hakim Keputusan AI Profesional untuk XAU/USD yang jujur terhadap data. Anda WAJIB membaca visual live chart secara otomatis (OCR Bid/Ask & sumbu-Y), menyelaraskan dengan Konsensus Harga Global, mengecek data real-time FastBull list-position (XAUUSD Open Positions & Pending Orders) agar tidak salah perkiraan, memeriksa DXY & berita geopolitik real-time, memetakan S/R + Fibonacci + MTF (M5-H4) dari kiri ke kanan, mengaudit riwayat trade rugi agar tidak terulang, dan DILARANG menggelembungkan confidence (95-98%) bila struktur belum terkonfirmasi penuh. Saat pasca-TP, jangan membuka posisi balik arah spontan tanpa konfirmasi struktur.';
 
       let rawText = '';
       let activeModelName = thinkingHigh ? 'gemini-4-hydrogen (Thinking High)' : 'gemini-4-hydrogen';
@@ -3895,6 +4748,29 @@ TUGAS KEPUTUSAN MANDIRI AI:
                     description:
                       'Ringkasan peta Support/Resistance (S1/R1), struktur pasar (HH/HL/LH/LL/BOS), dan chart/candlestick pattern yang dibaca AI',
                   },
+                  priceActionSignal: {
+                    type: Type.STRING,
+                    description:
+                      'Analisa Price Action Trading murni: Pin Bar, Engulfing, Inside Bar Breakout, rejection wick & struktur swing HH-HL/LH-LL',
+                  },
+                  harmonicPattern: {
+                    type: Type.STRING,
+                    description:
+                      'Evaluasi pola Harmonic Pattern Trading X-A-B-C-D (Gartley/Bat/Butterfly/Crab/Cypher/AB=CD) beserta rasio dan PRZ, atau nyatakan jika belum terbentuk',
+                  },
+                  lstmProbability: {
+                    type: Type.OBJECT,
+                    description:
+                      'Probabilitas arah LSTM hasil perhitungan mandiri AI sebagai analis independen dan trader profesional (upPct + downPct + holdPct = 100)',
+                    properties: {
+                      upPct: { type: Type.NUMBER, description: 'Probabilitas harga naik (0-100)' },
+                      downPct: { type: Type.NUMBER, description: 'Probabilitas harga turun (0-100)' },
+                      holdPct: { type: Type.NUMBER, description: 'Probabilitas konsolidasi/sideways (0-100)' },
+                      horizonMinutes: { type: Type.NUMBER, description: 'Horizon waktu proyeksi LSTM dalam menit (misal 5, 10, 15)' },
+                      rationale: { type: Type.STRING, description: 'Alasan perhitungan probabilitas LSTM mandiri' },
+                    },
+                    required: ['upPct', 'downPct', 'holdPct', 'horizonMinutes', 'rationale'],
+                  },
                   judgeVerdict: {
                     type: Type.STRING,
                     description:
@@ -3974,6 +4850,9 @@ TUGAS KEPUTUSAN MANDIRI AI:
                   'postTpEvaluation',
                   'postTpReason',
                   'keyLevelsSummary',
+                  'priceActionSignal',
+                  'harmonicPattern',
+                  'lstmProbability',
                   'judgeVerdict',
                   'indicatorWeighting',
                   'entryPrice',
@@ -4072,11 +4951,10 @@ TUGAS KEPUTUSAN MANDIRI AI:
             return res;
           },
           (err) => {
-            airforceEngineCooldownUntil.set(`or-dual:${primaryModel}`, Date.now() + 30_000);
-            console.warn(
-              `[Dual Span-01/PPLX] ${primaryModel} gagal (${
-                err instanceof Error ? err.message : String(err)
-              }). Mengambil alih ke ${secondaryModel}...`
+            const isRateLimit = err instanceof OpenRouterError && err.statusCode === 429;
+            airforceEngineCooldownUntil.set(
+              `or-dual:${primaryModel}`,
+              Date.now() + (isRateLimit ? 180_000 : 45_000)
             );
             triggerSecondary?.();
             throw err;
@@ -4103,7 +4981,11 @@ TUGAS KEPUTUSAN MANDIRI AI:
                 resolve(res);
               },
               (err) => {
-                airforceEngineCooldownUntil.set(`or-dual:${secondaryModel}`, Date.now() + 30_000);
+                const isRateLimit = err instanceof OpenRouterError && err.statusCode === 429;
+                airforceEngineCooldownUntil.set(
+                  `or-dual:${secondaryModel}`,
+                  Date.now() + (isRateLimit ? 180_000 : 45_000)
+                );
                 reject(err);
               }
             );
@@ -4112,9 +4994,6 @@ TUGAS KEPUTUSAN MANDIRI AI:
           triggerSecondary = startSecondary;
           slowTimer = setTimeout(() => {
             if (!settled) {
-              console.warn(
-                `[Dual Span-01/PPLX] ${primaryModel} lambat (>10s). Mengambil alih paralel dengan ${secondaryModel}...`
-              );
               startSecondary();
             }
           }, SLOW_TAKEOVER_MS);
@@ -4140,22 +5019,1092 @@ TUGAS KEPUTUSAN MANDIRI AI:
         }
       };
 
-      const runOpenRouterChatEngine = async (
+      const buildCompactChatPrompt = () => {
+        const last6 = snapshot.candles
+          .slice(-6)
+          .map((c) => `${c.open}/${c.high}/${c.low}/${c.close}`)
+          .join(' | ');
+        const sup = chartStructure.nearestSupport?.price.toFixed(2) ?? 'N/A';
+        const res = chartStructure.nearestResistance?.price.toFixed(2) ?? 'N/A';
+        return [
+          `XAU/USD ${tfLabel} | Strategy: ${strategyFocus} | Bid=${snapshot.quote.bid} Ask=${snapshot.quote.ask} Mid=${snapshot.quote.mid}`,
+          `Structure: ${chartStructure.marketStructure} | S1=${sup} | R1=${res} | ATR=${atrValue}`,
+          `EMA9=${ind.ema9 ?? 'N/A'} EMA21=${ind.ema21 ?? 'N/A'} EMA50=${ind.ema50 ?? 'N/A'} RSI14=${ind.rsi14 ?? 'N/A'} ADX14=${ind.adx14 ?? 'N/A'}`,
+          `DXY Bias=${macroContext.dxyBias} (${macroContext.dxyChangePct ?? 'N/A'}%) | GlobalMid=${globalSync.consensusMid}`,
+          `FastBull list-position XAUUSD: ${fastBullPosition.summary}`,
+          ...(chartStructure.harmonicPattern
+            ? [
+                `Harmonic=${chartStructure.harmonicPattern.direction} ${chartStructure.harmonicPattern.name} (${chartStructure.harmonicPattern.status}) PRZ ${chartStructure.harmonicPattern.przLow}-${chartStructure.harmonicPattern.przHigh}`,
+              ]
+            : []),
+          ...(isUltraUnified
+            ? [
+                'MODE: ULTRA-SCALPING ONLY (NO SWING / NO INTRADAY, TP<=30m) | Protokol Sinkronisasi Ganda | Predatory Surveillance & Predatory Standby',
+                unified8In1.summaryLine,
+              ]
+            : []),
+          `Last 6 OHLC: ${last6}`,
+          `OpenPositions=${openPositionsCount}${openDetailLines ? `\n${openDetailLines}` : ''}`,
+          `Decide BUY, SELL, or HOLD honestly (if ranging/choppy or ADX<20 or near S/R barrier, stay Predatory Standby HOLD with 50-68% confidence). Calculate your own independent lstmProbability (upPct+downPct+holdPct=100, ultra-scalp horizonMinutes 5-15), evaluate priceActionSignal and harmonicPattern. Set tight ultra-scalping entryPrice, stopLoss, takeProfit1, takeProfit2.`,
+        ].join('\n');
+      };
+
+      const invokeOpenRouterChat = async (
         cfg: OpenRouterDecisionsConfig,
-        modelName: string
+        modelName: string,
+        timeoutMs?: number
       ) => {
-        const resOrChat = await generateAnalysisViaOpenRouterChat({
+        return generateAnalysisViaOpenRouterChat({
           cfg,
           modelName,
+          timeoutMs,
           systemInstruction,
           promptText,
+          compactPromptText: buildCompactChatPrompt(),
           chartImageBase64: chartImageBase64Cleaned,
           thinkingHigh,
         });
+      };
+
+      const runOpenRouterChatEngine = async (
+        cfg: OpenRouterDecisionsConfig,
+        modelName: string,
+        timeoutMs?: number
+      ) => {
+        const resOrChat = await invokeOpenRouterChat(cfg, modelName, timeoutMs);
         rawText = resOrChat.rawText;
         usedChartVision = resOrChat.usedChartVision;
         activeModelName = resOrChat.model;
       };
+
+      const runOpenRouterFlashTrioAlternating = async (cfg: OpenRouterDecisionsConfig) => {
+        const baseOrder = [cfg.ernieModel, cfg.lfmModel, cfg.lingModel];
+        const offset = flashTrioCursor % baseOrder.length;
+        flashTrioCursor = (flashTrioCursor + 1) % baseOrder.length;
+        const rotated = [...baseOrder.slice(offset), ...baseOrder.slice(0, offset)];
+
+        const nowMs = Date.now();
+        const readyModels = rotated.filter(
+          (m) => (airforceEngineCooldownUntil.get(`or-trio:${m}`) ?? 0) <= nowMs
+        );
+        const coolingModels = rotated
+          .filter((m) => (airforceEngineCooldownUntil.get(`or-trio:${m}`) ?? 0) > nowMs)
+          .sort(
+            (a, b) =>
+              (airforceEngineCooldownUntil.get(`or-trio:${a}`) ?? 0) -
+              (airforceEngineCooldownUntil.get(`or-trio:${b}`) ?? 0)
+          );
+        const orderedModels = [...readyModels, ...coolingModels];
+        const [m0, m1, m2] = orderedModels;
+
+        const SLOW_SECOND_MS = 10_000;
+        const SLOW_THIRD_MS = 18_000;
+        let settled = false;
+        let timer2: ReturnType<typeof setTimeout> | null = null;
+        let timer3: ReturnType<typeof setTimeout> | null = null;
+        let triggerSecond: (() => void) | null = null;
+        let triggerThird: (() => void) | null = null;
+
+        const clearTimers = () => {
+          if (timer2) {
+            clearTimeout(timer2);
+            timer2 = null;
+          }
+          if (timer3) {
+            clearTimeout(timer3);
+            timer3 = null;
+          }
+        };
+
+        const p0 = invokeOpenRouterChat(cfg, m0, 38_000).then(
+          (res) => {
+            settled = true;
+            clearTimers();
+            airforceEngineCooldownUntil.delete(`or-trio:${m0}`);
+            return res;
+          },
+          (err) => {
+            const isRateLimit = err instanceof OpenRouterError && err.statusCode === 429;
+            airforceEngineCooldownUntil.set(
+              `or-trio:${m0}`,
+              Date.now() + (isRateLimit ? 180_000 : 45_000)
+            );
+            triggerSecond?.();
+            throw err;
+          }
+        );
+
+        const p1 = new Promise<{
+          rawText: string;
+          model: string;
+          usedChartVision: boolean;
+        }>((resolve, reject) => {
+          let started = false;
+          const start = () => {
+            if (started || settled) return;
+            started = true;
+            if (timer2) {
+              clearTimeout(timer2);
+              timer2 = null;
+            }
+            invokeOpenRouterChat(cfg, m1, 36_000).then(
+              (res) => {
+                settled = true;
+                clearTimers();
+                airforceEngineCooldownUntil.delete(`or-trio:${m1}`);
+                resolve(res);
+              },
+              (err) => {
+                const isRateLimit = err instanceof OpenRouterError && err.statusCode === 429;
+                airforceEngineCooldownUntil.set(
+                  `or-trio:${m1}`,
+                  Date.now() + (isRateLimit ? 180_000 : 45_000)
+                );
+                triggerThird?.();
+                reject(err);
+              }
+            );
+          };
+          triggerSecond = start;
+          timer2 = setTimeout(() => {
+            if (!settled) {
+              start();
+            }
+          }, SLOW_SECOND_MS);
+        });
+
+        const p2 = new Promise<{
+          rawText: string;
+          model: string;
+          usedChartVision: boolean;
+        }>((resolve, reject) => {
+          let started = false;
+          const start = () => {
+            if (started || settled) return;
+            started = true;
+            if (timer3) {
+              clearTimeout(timer3);
+              timer3 = null;
+            }
+            invokeOpenRouterChat(cfg, m2, 34_000).then(
+              (res) => {
+                settled = true;
+                clearTimers();
+                airforceEngineCooldownUntil.delete(`or-trio:${m2}`);
+                resolve(res);
+              },
+              (err) => {
+                const isRateLimit = err instanceof OpenRouterError && err.statusCode === 429;
+                airforceEngineCooldownUntil.set(
+                  `or-trio:${m2}`,
+                  Date.now() + (isRateLimit ? 180_000 : 45_000)
+                );
+                reject(err);
+              }
+            );
+          };
+          triggerThird = start;
+          timer3 = setTimeout(() => {
+            if (!settled) {
+              start();
+            }
+          }, SLOW_THIRD_MS);
+        });
+
+        p1.catch(() => {});
+        p2.catch(() => {});
+
+        try {
+          const winner = await Promise.any([p0, p1, p2]);
+          rawText = winner.rawText;
+          usedChartVision = winner.usedChartVision;
+          activeModelName = winner.model;
+        } catch (aggErr) {
+          clearTimers();
+          if (aggErr instanceof AggregateError && aggErr.errors.length > 0) {
+            throw aggErr.errors[aggErr.errors.length - 1];
+          }
+          throw aggErr;
+        }
+      };
+
+      const runStrictDualConsensus = async (opts: {
+        labelA: string;
+        modelIdA: string;
+        runA: () => Promise<{ rawText: string; model: string; usedChartVision: boolean }>;
+        labelB: string;
+        modelIdB: string;
+        runB: () => Promise<{ rawText: string; model: string; usedChartVision: boolean }>;
+        tag: string;
+      }) => {
+        const { labelA, modelIdA, runA, labelB, modelIdB, runB, tag } = opts;
+
+        interface ConsensusParsedPayload {
+          signal?: string;
+          confidence?: number;
+          marketBias?: string;
+          positionDecision?: string;
+          positionReason?: string;
+          winProbability?: number;
+          reversalConfidence?: number;
+          highProbTp?: number;
+          highProbTpConfidence?: number;
+          postTpEvaluation?: string;
+          postTpReason?: string;
+          keyLevelsSummary?: string;
+          priceActionSignal?: string;
+          harmonicPattern?: string;
+          lstmProbability?: {
+            upPct?: number;
+            downPct?: number;
+            holdPct?: number;
+            horizonMinutes?: number;
+            rationale?: string;
+          };
+          judgeVerdict?: string;
+          indicatorWeighting?: string;
+          ocrExtractedPrice?: string;
+          globalSyncSummary?: string;
+          macroSummary?: string;
+          mtfSummary?: string;
+          entryPrice?: number;
+          stopLoss?: number;
+          takeProfit1?: number;
+          takeProfit2?: number;
+          riskRewardRatio?: string;
+          setupPattern?: string;
+          summary?: string;
+          keyFactors?: string[];
+          invalidatedIf?: string;
+        }
+
+        const normSig = (s?: string): 'BUY' | 'SELL' | 'HOLD' => {
+          const up = String(s || '').toUpperCase().trim();
+          if (up === 'BUY' || up === 'LONG') return 'BUY';
+          if (up === 'SELL' || up === 'SHORT') return 'SELL';
+          return 'HOLD';
+        };
+        const normBias = (b?: string): 'BULLISH' | 'BEARISH' | 'RANGING' => {
+          const up = String(b || '').toUpperCase();
+          if (/BULL/i.test(up)) return 'BULLISH';
+          if (/BEAR/i.test(up)) return 'BEARISH';
+          return 'RANGING';
+        };
+        const safeParsePayload = (
+          res: { rawText: string; model: string; usedChartVision: boolean }
+        ): {
+          res: { rawText: string; model: string; usedChartVision: boolean };
+          data: ConsensusParsedPayload;
+        } => {
+          const data = JSON.parse(extractJsonObjectString(res.rawText)) as ConsensusParsedPayload;
+          return { res, data };
+        };
+
+        const [settledA, settledB] = await Promise.allSettled([
+          runA().then(safeParsePayload),
+          runB().then(safeParsePayload),
+        ]);
+
+        const formatEngineReason = (reason: unknown): string => {
+          if (reason instanceof OpenRouterError) {
+            if (reason.statusCode === 429) {
+              return 'HTTP 429 (limit rate/kuota :free tercapai)';
+            }
+            if (reason.statusCode === 408) {
+              return 'Timeout (408)';
+            }
+            const cleanDetail = reason.detail.replace(/error/gi, 'kendala').slice(0, 95);
+            return `HTTP ${reason.statusCode}: ${cleanDetail}`;
+          }
+          if (reason instanceof Error) {
+            return reason.message.replace(/error/gi, 'kendala').slice(0, 95);
+          }
+          return 'Tidak tersedia';
+        };
+
+        const okA = settledA.status === 'fulfilled' ? settledA.value : null;
+        const okB = settledB.status === 'fulfilled' ? settledB.value : null;
+
+        if (!okA && !okB) {
+          const reasonA = settledA.status === 'rejected' ? formatEngineReason(settledA.reason) : 'N/A';
+          const reasonB = settledB.status === 'rejected' ? formatEngineReason(settledB.reason) : 'N/A';
+          throw new OpenRouterError(
+            503,
+            `Kedua engine konsensus tidak tersedia (${labelA}: ${reasonA} | ${labelB}: ${reasonB}).`
+          );
+        }
+
+        if ((okA && !okB) || (!okA && okB)) {
+          const availableName = okA ? labelA : labelB;
+          const missingName = okA ? labelB : labelA;
+          const missingReason = formatEngineReason(
+            okA
+              ? settledB.status === 'rejected'
+                ? settledB.reason
+                : undefined
+              : settledA.status === 'rejected'
+              ? settledA.reason
+              : undefined
+          );
+          const solo = (okA ?? okB)!.data;
+          const soloSig = normSig(solo.signal);
+          const soloConf = Number.isFinite(Number(solo.confidence))
+            ? Math.max(10, Math.min(98, Math.round(Number(solo.confidence))))
+            : 55;
+          const soloRes = (okA ?? okB)!.res;
+          const holdNote = `[WAJIB KONSENSUS 2 ENGINE -> HOLD] ${missingName} tidak tersedia (${missingReason}), sedangkan ${availableName} menilai ${soloSig} (${soloConf}%). Keputusan dikunci HOLD sampai kedua engine sepakat.`;
+
+          const patched = {
+            ...solo,
+            signal: 'HOLD',
+            confidence: Math.min(55, soloConf),
+            marketBias: normBias(solo.marketBias),
+            positionDecision: openPositionsCount > 0 ? 'KEEP' : 'NONE',
+            positionReason:
+              openPositionsCount > 0
+                ? `${missingName} tidak merespon (${missingReason}); posisi aktif dipertahankan (KEEP) menunggu konfirmasi penuh 2 engine.`
+                : 'Tidak ada posisi aktif.',
+            postTpEvaluation:
+              latestClosed && latestClosed.closedMinutesAgo <= 90 ? 'WAIT_PULLBACK_HOLD' : 'NONE',
+            entryPrice: snapshot.quote.mid,
+            stopLoss: Number((snapshot.quote.mid - atrValue * 1.15).toFixed(2)),
+            takeProfit1: Number((snapshot.quote.mid + atrValue * 1.5).toFixed(2)),
+            takeProfit2: Number((snapshot.quote.mid + atrValue * 2.4).toFixed(2)),
+            setupPattern: `HOLD — ${missingName} Offline (${missingReason})`,
+            judgeVerdict: holdNote,
+            indicatorWeighting: `Dual Konsensus Strict: ${availableName}=${soloSig} (${soloConf}%) | ${missingName}=${missingReason} -> HOLD`,
+            summary: `${holdNote} [Catatan ${availableName}]: ${solo.summary || '-'}`,
+            keyFactors: [
+              `${availableName}: ${soloSig} (${soloConf}%)`,
+              `${missingName}: ${missingReason}`,
+              ...(Array.isArray(solo.keyFactors) ? solo.keyFactors.slice(0, 2) : []),
+            ].slice(0, 4),
+          };
+          rawText = JSON.stringify(patched);
+          usedChartVision = soloRes.usedChartVision;
+          activeModelName = `openrouter/dual-consensus(${tag} | ${missingName} offline -> HOLD)`;
+          return;
+        }
+
+        // Both engines succeeded: synthesize strict consensus decision!
+        const e = okA!.data;
+        const p = okB!.data;
+        const eSig = normSig(e.signal);
+        const pSig = normSig(p.signal);
+        const eConf = Number.isFinite(Number(e.confidence))
+          ? Math.max(10, Math.min(98, Math.round(Number(e.confidence))))
+          : 60;
+        const pConf = Number.isFinite(Number(p.confidence))
+          ? Math.max(10, Math.min(98, Math.round(Number(p.confidence))))
+          : 60;
+        const eBias = normBias(e.marketBias);
+        const pBias = normBias(p.marketBias);
+
+        let finalSignal: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
+        let finalConfidence = 60;
+        let finalBias: 'BULLISH' | 'BEARISH' | 'RANGING' = 'RANGING';
+        let consensusStatusNote = '';
+
+        if (eSig === pSig && (eSig === 'BUY' || eSig === 'SELL')) {
+          finalSignal = eSig;
+          const baseAvg = eConf * 0.5 + pConf * 0.5;
+          const bonus = eConf >= 75 && pConf >= 75 ? 2 : 0;
+          finalConfidence = Math.max(55, Math.min(97, Math.round(baseAvg + bonus)));
+          finalBias = eSig === 'BUY' ? 'BULLISH' : 'BEARISH';
+          consensusStatusNote = `[KONSENSUS SEPAKAT ${finalSignal}] ${labelA} (${eSig} ${eConf}%) & ${labelB} (${pSig} ${pConf}%)`;
+        } else if (eSig === 'HOLD' && pSig === 'HOLD') {
+          finalSignal = 'HOLD';
+          finalConfidence = Math.max(40, Math.min(82, Math.round((eConf + pConf) / 2)));
+          finalBias = eBias === pBias ? eBias : 'RANGING';
+          consensusStatusNote = `[KONSENSUS HOLD] ${labelA} (HOLD ${eConf}%) & ${labelB} (HOLD ${pConf}%) sepakat menunggu konfirmasi.`;
+        } else {
+          finalSignal = 'HOLD';
+          finalConfidence = Math.max(40, Math.min(66, Math.min(eConf, pConf)));
+          finalBias = eBias === pBias ? eBias : 'RANGING';
+          consensusStatusNote = `[BELUM SEPAKAT -> HOLD] ${labelA}: ${eSig} (${eConf}%) vs ${labelB}: ${pSig} (${pConf}%). Menunggu kedua engine searah.`;
+        }
+
+        const entryPrice =
+          finalSignal === 'BUY'
+            ? snapshot.quote.ask
+            : finalSignal === 'SELL'
+            ? snapshot.quote.bid
+            : snapshot.quote.mid;
+
+        const pickValidLevel = (
+          valA: unknown,
+          valB: unknown,
+          validator: (v: number) => boolean,
+          fallback: number
+        ): number => {
+          const a = Number(valA);
+          const b = Number(valB);
+          const aOk = Number.isFinite(a) && validator(a);
+          const bOk = Number.isFinite(b) && validator(b);
+          if (aOk && bOk) return Number(((a + b) / 2).toFixed(2));
+          if (aOk) return Number(a.toFixed(2));
+          if (bOk) return Number(b.toFixed(2));
+          return Number(fallback.toFixed(2));
+        };
+
+        let stopLoss = entryPrice - atrValue * 1.15;
+        let takeProfit1 = entryPrice + atrValue * 1.5;
+        let takeProfit2 = entryPrice + atrValue * 2.4;
+
+        if (finalSignal === 'SELL') {
+          stopLoss = pickValidLevel(
+            e.stopLoss,
+            p.stopLoss,
+            (v) => v > entryPrice + 0.3,
+            entryPrice + atrValue * 1.15
+          );
+          takeProfit1 = pickValidLevel(
+            e.takeProfit1,
+            p.takeProfit1,
+            (v) => v < entryPrice - 0.3,
+            entryPrice - atrValue * 1.5
+          );
+          takeProfit2 = pickValidLevel(
+            e.takeProfit2,
+            p.takeProfit2,
+            (v) => v < takeProfit1 - 0.2,
+            takeProfit1 - atrValue * 0.9
+          );
+        } else {
+          stopLoss = pickValidLevel(
+            e.stopLoss,
+            p.stopLoss,
+            (v) => v < entryPrice - 0.3,
+            entryPrice - atrValue * 1.15
+          );
+          takeProfit1 = pickValidLevel(
+            e.takeProfit1,
+            p.takeProfit1,
+            (v) => v > entryPrice + 0.3,
+            entryPrice + atrValue * 1.5
+          );
+          takeProfit2 = pickValidLevel(
+            e.takeProfit2,
+            p.takeProfit2,
+            (v) => v > takeProfit1 + 0.2,
+            takeProfit1 + atrValue * 0.9
+          );
+        }
+
+        const eWin = Number.isFinite(Number(e.winProbability)) ? Number(e.winProbability) : 65;
+        const pWin = Number.isFinite(Number(p.winProbability)) ? Number(p.winProbability) : 65;
+        const eRev = Number.isFinite(Number(e.reversalConfidence))
+          ? Number(e.reversalConfidence)
+          : 25;
+        const pRev = Number.isFinite(Number(p.reversalConfidence))
+          ? Number(p.reversalConfidence)
+          : 25;
+        const avgWinProb = Math.round((eWin + pWin) / 2);
+        const avgRevConf = Math.round((eRev + pRev) / 2);
+
+        const ePos = String(e.positionDecision || 'NONE').toUpperCase().trim();
+        const pPos = String(p.positionDecision || 'NONE').toUpperCase().trim();
+        let finalPosDecision = 'NONE';
+        if (openPositionsCount > 0) {
+          const eWantsClose = ePos === 'CLOSE_BUY' || ePos === 'CLOSE_SELL' || ePos === 'CLOSE_ALL';
+          const pWantsClose = pPos === 'CLOSE_BUY' || pPos === 'CLOSE_SELL' || pPos === 'CLOSE_ALL';
+          if (eWantsClose && pWantsClose && avgWinProb < 20 && avgRevConf >= 80) {
+            finalPosDecision = ePos === pPos ? ePos : 'CLOSE_ALL';
+          } else {
+            finalPosDecision = 'KEEP';
+          }
+        }
+
+        const ePostTp = String(e.postTpEvaluation || 'NONE').toUpperCase().trim();
+        const pPostTp = String(p.postTpEvaluation || 'NONE').toUpperCase().trim();
+        let finalPostTpEval = 'NONE';
+        if (latestClosed && latestClosed.closedMinutesAgo <= 90) {
+          if (ePostTp === 'RE_ENTRY_CONTINUATION' && pPostTp === 'RE_ENTRY_CONTINUATION') {
+            finalPostTpEval = 'RE_ENTRY_CONTINUATION';
+          } else if (ePostTp === 'EXHAUSTION_SKIP' || pPostTp === 'EXHAUSTION_SKIP') {
+            finalPostTpEval = 'EXHAUSTION_SKIP';
+          } else {
+            finalPostTpEval = 'WAIT_PULLBACK_HOLD';
+          }
+        }
+
+        const mergedFactors = [
+          `${labelA}: ${eSig} (${eConf}%, Bias ${eBias})`,
+          `${labelB}: ${pSig} (${pConf}%, Bias ${pBias})`,
+          ...(Array.isArray(e.keyFactors) ? e.keyFactors.slice(0, 1) : []),
+          ...(Array.isArray(p.keyFactors) ? p.keyFactors.slice(0, 1) : []),
+        ].slice(0, 4);
+
+        const consensusSetup =
+          finalSignal === 'HOLD' && eSig !== pSig
+            ? `HOLD — Dual Konsensus Tidak Sepakat (${eSig} vs ${pSig})`
+            : e.setupPattern || p.setupPattern || `Dual Konsensus ${finalSignal}`;
+
+        const avgLstmProb = (() => {
+          const aL = e.lstmProbability;
+          const bL = p.lstmProbability;
+          if (!aL && !bL) return undefined;
+          const upA = Number.isFinite(Number(aL?.upPct)) ? Number(aL?.upPct) : 33;
+          const dnA = Number.isFinite(Number(aL?.downPct)) ? Number(aL?.downPct) : 33;
+          const upB = Number.isFinite(Number(bL?.upPct)) ? Number(bL?.upPct) : 33;
+          const dnB = Number.isFinite(Number(bL?.downPct)) ? Number(bL?.downPct) : 33;
+          const upPct = Math.max(0, Math.min(100, Math.round((upA + upB) / 2)));
+          const downPct = Math.max(0, Math.min(100 - upPct, Math.round((dnA + dnB) / 2)));
+          const holdPct = Math.max(0, 100 - upPct - downPct);
+          return {
+            upPct,
+            downPct,
+            holdPct,
+            horizonMinutes: Math.round(
+              ((Number(aL?.horizonMinutes) || 15) + (Number(bL?.horizonMinutes) || 15)) / 2
+            ),
+            rationale: `${labelA} (${upA}%/${dnA}%) + ${labelB} (${upB}%/${dnB}%): ${
+              aL?.rationale || bL?.rationale || 'Konsensus probabilitas LSTM 2 engine.'
+            }`,
+          };
+        })();
+
+        const synthesizedPayload = {
+          signal: finalSignal,
+          confidence: finalConfidence,
+          marketBias: finalBias,
+          positionDecision: finalPosDecision,
+          positionReason:
+            openPositionsCount > 0
+              ? `Dual Konsensus Exit Judge: WinProb=${avgWinProb}% (${labelA} ${Math.round(
+                  eWin
+                )}% / ${labelB} ${Math.round(pWin)}%), RevConf=${avgRevConf}% (${labelA} ${Math.round(
+                  eRev
+                )}% / ${labelB} ${Math.round(pRev)}%).`
+              : 'Tidak ada posisi aktif.',
+          winProbability: openPositionsCount > 0 ? avgWinProb : undefined,
+          reversalConfidence: openPositionsCount > 0 ? avgRevConf : undefined,
+          highProbTp:
+            finalSignal === 'SELL'
+              ? Math.max(Number(e.highProbTp) || takeProfit1, Number(p.highProbTp) || takeProfit1)
+              : Math.min(Number(e.highProbTp) || takeProfit1, Number(p.highProbTp) || takeProfit1),
+          highProbTpConfidence: Math.max(
+            85,
+            Math.min(
+              97,
+              Math.round(
+                ((Number(e.highProbTpConfidence) || 88) +
+                  (Number(p.highProbTpConfidence) || 88)) /
+                  2
+              )
+            )
+          ),
+          postTpEvaluation: finalPostTpEval,
+          postTpReason: `${e.postTpReason || ''} | ${p.postTpReason || ''}`.replace(/^\s*\|\s*|\s*\|\s*$/g, ''),
+          keyLevelsSummary: e.keyLevelsSummary || p.keyLevelsSummary || '',
+          priceActionSignal: e.priceActionSignal || p.priceActionSignal || '',
+          harmonicPattern: e.harmonicPattern || p.harmonicPattern || '',
+          ...(avgLstmProb ? { lstmProbability: avgLstmProb } : {}),
+          judgeVerdict: consensusStatusNote,
+          indicatorWeighting: `Dual Engine Aktif: ${modelIdA} (${eSig} ${eConf}%) + ${modelIdB} (${pSig} ${pConf}%)`,
+          ocrExtractedPrice: e.ocrExtractedPrice || p.ocrExtractedPrice || '',
+          globalSyncSummary: e.globalSyncSummary || p.globalSyncSummary || '',
+          macroSummary: e.macroSummary || p.macroSummary || '',
+          mtfSummary: e.mtfSummary || p.mtfSummary || '',
+          entryPrice,
+          stopLoss,
+          takeProfit1,
+          takeProfit2,
+          riskRewardRatio: e.riskRewardRatio || p.riskRewardRatio || '1:1.5',
+          setupPattern: consensusSetup,
+          summary: `${consensusStatusNote}. [${labelA}]: ${e.summary || '-'} | [${labelB}]: ${
+            p.summary || '-'
+          }`,
+          keyFactors: mergedFactors,
+          invalidatedIf: e.invalidatedIf || p.invalidatedIf || 'Break level invalidasi S/R utama.',
+        };
+
+        rawText = JSON.stringify(synthesizedPayload);
+        usedChartVision = okA!.res.usedChartVision || okB!.res.usedChartVision;
+        activeModelName = `openrouter/dual-consensus(${tag})`;
+      };
+
+      const runOpenRouterGemmaPplxConsensus = (cfg: OpenRouterDecisionsConfig) =>
+        runStrictDualConsensus({
+          labelA: 'Gemma-4-26B',
+          modelIdA: cfg.gemmaModel,
+          runA: () => invokeOpenRouterChat(cfg, cfg.gemmaModel, 42_000),
+          labelB: 'PPLX-Decider',
+          modelIdB: cfg.model,
+          runB: () => invokeOpenRouterDecisions(cfg, cfg.model, 36_000),
+          tag: 'gemma-4-26b+pplx-decider',
+        });
+
+      const runOpenRouterClefPplx12Consensus = (cfg: OpenRouterDecisionsConfig) =>
+        runStrictDualConsensus({
+          labelA: 'Clef-Flash',
+          modelIdA: cfg.clefModel,
+          runA: () => invokeOpenRouterDecisions(cfg, cfg.clefModel, 36_000),
+          labelB: 'PPLX-Decider-v1.2',
+          modelIdB: cfg.pplxV12Model,
+          runB: () => invokeOpenRouterDecisions(cfg, cfg.pplxV12Model, 36_000),
+          tag: 'clef-flash+pplx-v1.2',
+        });
+
+      const runTripleTwoOfThreeConsensus = async (opts: {
+        engines: Array<{
+          label: string;
+          modelId: string;
+          run: () => Promise<{ rawText: string; model: string; usedChartVision: boolean }>;
+        }>;
+        tag: string;
+      }) => {
+        const { engines, tag } = opts;
+
+        interface TripleParsedPayload {
+          signal?: string;
+          confidence?: number;
+          marketBias?: string;
+          positionDecision?: string;
+          positionReason?: string;
+          winProbability?: number;
+          reversalConfidence?: number;
+          highProbTp?: number;
+          highProbTpConfidence?: number;
+          postTpEvaluation?: string;
+          postTpReason?: string;
+          keyLevelsSummary?: string;
+          priceActionSignal?: string;
+          harmonicPattern?: string;
+          lstmProbability?: {
+            upPct?: number;
+            downPct?: number;
+            holdPct?: number;
+            horizonMinutes?: number;
+            rationale?: string;
+          };
+          judgeVerdict?: string;
+          indicatorWeighting?: string;
+          ocrExtractedPrice?: string;
+          globalSyncSummary?: string;
+          macroSummary?: string;
+          mtfSummary?: string;
+          entryPrice?: number;
+          stopLoss?: number;
+          takeProfit1?: number;
+          takeProfit2?: number;
+          riskRewardRatio?: string;
+          setupPattern?: string;
+          summary?: string;
+          keyFactors?: string[];
+          invalidatedIf?: string;
+        }
+
+        const normSig = (s?: string): 'BUY' | 'SELL' | 'HOLD' => {
+          const up = String(s || '').toUpperCase().trim();
+          if (up === 'BUY' || up === 'LONG') return 'BUY';
+          if (up === 'SELL' || up === 'SHORT') return 'SELL';
+          return 'HOLD';
+        };
+        const normBias = (b?: string): 'BULLISH' | 'BEARISH' | 'RANGING' => {
+          const up = String(b || '').toUpperCase();
+          if (/BULL/i.test(up)) return 'BULLISH';
+          if (/BEAR/i.test(up)) return 'BEARISH';
+          return 'RANGING';
+        };
+        const formatEngineReason = (reason: unknown): string => {
+          if (reason instanceof OpenRouterError) {
+            if (reason.statusCode === 429) {
+              return 'HTTP 429 (limit rate/kuota :free tercapai)';
+            }
+            if (reason.statusCode === 408) {
+              return 'Timeout (408)';
+            }
+            const cleanDetail = reason.detail.replace(/error/gi, 'kendala').slice(0, 95);
+            return `HTTP ${reason.statusCode}: ${cleanDetail}`;
+          }
+          if (reason instanceof Error) {
+            return reason.message.replace(/error/gi, 'kendala').slice(0, 95);
+          }
+          return 'Tidak tersedia';
+        };
+
+        const settledList = await Promise.allSettled(
+          engines.map(async (eng) => {
+            const res = await eng.run();
+            const data = JSON.parse(extractJsonObjectString(res.rawText)) as TripleParsedPayload;
+            const sig = normSig(data.signal);
+            const conf = Number.isFinite(Number(data.confidence))
+              ? Math.max(10, Math.min(98, Math.round(Number(data.confidence))))
+              : 60;
+            const bias = normBias(data.marketBias);
+            return { eng, res, data, sig, conf, bias };
+          })
+        );
+
+        const fulfilled = settledList
+          .filter(
+            (
+              s
+            ): s is PromiseFulfilledResult<{
+              eng: (typeof engines)[number];
+              res: { rawText: string; model: string; usedChartVision: boolean };
+              data: TripleParsedPayload;
+              sig: 'BUY' | 'SELL' | 'HOLD';
+              conf: number;
+              bias: 'BULLISH' | 'BEARISH' | 'RANGING';
+            }> => s.status === 'fulfilled'
+          )
+          .map((s) => s.value);
+
+        const failedNotes = settledList
+          .map((s, idx) =>
+            s.status === 'rejected'
+              ? `${engines[idx].label}: ${formatEngineReason(s.reason)}`
+              : null
+          )
+          .filter((x): x is string => Boolean(x));
+
+        if (fulfilled.length === 0) {
+          throw new OpenRouterError(
+            503,
+            `Ketiga engine konsensus 2/3 tidak tersedia (${failedNotes.join(' | ')}).`
+          );
+        }
+
+        const buyVotes = fulfilled.filter((f) => f.sig === 'BUY');
+        const sellVotes = fulfilled.filter((f) => f.sig === 'SELL');
+        const holdVotes = fulfilled.filter((f) => f.sig === 'HOLD');
+
+        let finalSignal: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
+        let finalConfidence = 55;
+        let finalBias: 'BULLISH' | 'BEARISH' | 'RANGING' = 'RANGING';
+        let winningVotes = fulfilled;
+
+        const voteStatuses = settledList.map((s, idx) => {
+          const name = engines[idx].label;
+          if (s.status === 'fulfilled') {
+            return `${name}: ${s.value.sig} (${s.value.conf}%)`;
+          }
+          return `${name}: OFFLINE (${formatEngineReason(s.reason)})`;
+        });
+
+        let consensusStatusNote = '';
+        if (buyVotes.length >= 2) {
+          finalSignal = 'BUY';
+          finalBias = 'BULLISH';
+          winningVotes = buyVotes;
+          const avgBuyConf =
+            buyVotes.reduce((acc, v) => acc + v.conf, 0) / buyVotes.length;
+          const bonus = buyVotes.length === 3 ? 3 : 0;
+          finalConfidence = Math.max(55, Math.min(97, Math.round(avgBuyConf + bonus)));
+          consensusStatusNote = `[KONSENSUS ${buyVotes.length}/3 SEPAKAT BUY] ${voteStatuses.join(' | ')}`;
+        } else if (sellVotes.length >= 2) {
+          finalSignal = 'SELL';
+          finalBias = 'BEARISH';
+          winningVotes = sellVotes;
+          const avgSellConf =
+            sellVotes.reduce((acc, v) => acc + v.conf, 0) / sellVotes.length;
+          const bonus = sellVotes.length === 3 ? 3 : 0;
+          finalConfidence = Math.max(55, Math.min(97, Math.round(avgSellConf + bonus)));
+          consensusStatusNote = `[KONSENSUS ${sellVotes.length}/3 SEPAKAT SELL] ${voteStatuses.join(' | ')}`;
+        } else {
+          finalSignal = 'HOLD';
+          winningVotes = holdVotes.length > 0 ? holdVotes : fulfilled;
+          const avgAllConf =
+            fulfilled.reduce((acc, v) => acc + v.conf, 0) / fulfilled.length;
+          const allHold = buyVotes.length === 0 && sellVotes.length === 0;
+          finalConfidence = allHold
+            ? Math.max(40, Math.min(82, Math.round(avgAllConf)))
+            : Math.max(40, Math.min(64, Math.round(avgAllConf)));
+          const bullCount = fulfilled.filter((f) => f.bias === 'BULLISH').length;
+          const bearCount = fulfilled.filter((f) => f.bias === 'BEARISH').length;
+          finalBias =
+            bullCount >= 2 ? 'BULLISH' : bearCount >= 2 ? 'BEARISH' : 'RANGING';
+          consensusStatusNote = allHold
+            ? `[KONSENSUS HOLD] ${voteStatuses.join(' | ')}`
+            : `[SYARAT ≥2/3 TIDAK TERPENUHI -> OTOMATIS HOLD] Hanya ${Math.max(
+                buyVotes.length,
+                sellVotes.length
+              )}/3 searah (${voteStatuses.join(' | ')}).`;
+        }
+
+        const entryPrice =
+          finalSignal === 'BUY'
+            ? snapshot.quote.ask
+            : finalSignal === 'SELL'
+            ? snapshot.quote.bid
+            : snapshot.quote.mid;
+
+        const avgValidLevel = (
+          picker: (d: TripleParsedPayload) => unknown,
+          validator: (v: number) => boolean,
+          fallback: number
+        ): number => {
+          const valid = winningVotes
+            .map((v) => Number(picker(v.data)))
+            .filter((n) => Number.isFinite(n) && validator(n));
+          if (valid.length > 0) {
+            return Number((valid.reduce((a, b) => a + b, 0) / valid.length).toFixed(2));
+          }
+          return Number(fallback.toFixed(2));
+        };
+
+        let stopLoss = entryPrice - atrValue * 1.15;
+        let takeProfit1 = entryPrice + atrValue * 1.5;
+        let takeProfit2 = entryPrice + atrValue * 2.4;
+
+        if (finalSignal === 'SELL') {
+          stopLoss = avgValidLevel(
+            (d) => d.stopLoss,
+            (v) => v > entryPrice + 0.3,
+            entryPrice + atrValue * 1.15
+          );
+          takeProfit1 = avgValidLevel(
+            (d) => d.takeProfit1,
+            (v) => v < entryPrice - 0.3,
+            entryPrice - atrValue * 1.5
+          );
+          takeProfit2 = avgValidLevel(
+            (d) => d.takeProfit2,
+            (v) => v < takeProfit1 - 0.2,
+            takeProfit1 - atrValue * 0.9
+          );
+        } else {
+          stopLoss = avgValidLevel(
+            (d) => d.stopLoss,
+            (v) => v < entryPrice - 0.3,
+            entryPrice - atrValue * 1.15
+          );
+          takeProfit1 = avgValidLevel(
+            (d) => d.takeProfit1,
+            (v) => v > entryPrice + 0.3,
+            entryPrice + atrValue * 1.5
+          );
+          takeProfit2 = avgValidLevel(
+            (d) => d.takeProfit2,
+            (v) => v > takeProfit1 + 0.2,
+            takeProfit1 + atrValue * 0.9
+          );
+        }
+
+        const winVals = fulfilled.map((f) =>
+          Number.isFinite(Number(f.data.winProbability)) ? Number(f.data.winProbability) : 65
+        );
+        const revVals = fulfilled.map((f) =>
+          Number.isFinite(Number(f.data.reversalConfidence))
+            ? Number(f.data.reversalConfidence)
+            : 25
+        );
+        const avgWinProb = Math.round(winVals.reduce((a, b) => a + b, 0) / winVals.length);
+        const avgRevConf = Math.round(revVals.reduce((a, b) => a + b, 0) / revVals.length);
+
+        let finalPosDecision = 'NONE';
+        if (openPositionsCount > 0) {
+          const closeVotes = fulfilled
+            .map((f) => String(f.data.positionDecision || 'NONE').toUpperCase().trim())
+            .filter((p) => p === 'CLOSE_BUY' || p === 'CLOSE_SELL' || p === 'CLOSE_ALL');
+          if (closeVotes.length >= 2 && avgWinProb < 20 && avgRevConf >= 80) {
+            finalPosDecision =
+              closeVotes.every((c) => c === closeVotes[0]) ? closeVotes[0] : 'CLOSE_ALL';
+          } else {
+            finalPosDecision = 'KEEP';
+          }
+        }
+
+        let finalPostTpEval = 'NONE';
+        if (latestClosed && latestClosed.closedMinutesAgo <= 90) {
+          const postVotes = fulfilled.map((f) =>
+            String(f.data.postTpEvaluation || 'NONE').toUpperCase().trim()
+          );
+          const reEntryCount = postVotes.filter((v) => v === 'RE_ENTRY_CONTINUATION').length;
+          if (postVotes.some((v) => v === 'EXHAUSTION_SKIP')) {
+            finalPostTpEval = 'EXHAUSTION_SKIP';
+          } else if (reEntryCount >= 2) {
+            finalPostTpEval = 'RE_ENTRY_CONTINUATION';
+          } else {
+            finalPostTpEval = 'WAIT_PULLBACK_HOLD';
+          }
+        }
+
+        const avgLstmProb = (() => {
+          const withLstm = fulfilled.filter((f) => Boolean(f.data.lstmProbability));
+          if (withLstm.length === 0) return undefined;
+          const avgUp =
+            withLstm.reduce((s, f) => s + (Number(f.data.lstmProbability?.upPct) || 33), 0) /
+            withLstm.length;
+          const avgDn =
+            withLstm.reduce((s, f) => s + (Number(f.data.lstmProbability?.downPct) || 33), 0) /
+            withLstm.length;
+          const upPct = Math.max(0, Math.min(100, Math.round(avgUp)));
+          const downPct = Math.max(0, Math.min(100 - upPct, Math.round(avgDn)));
+          const holdPct = Math.max(0, 100 - upPct - downPct);
+          const avgHorizon = Math.round(
+            withLstm.reduce(
+              (s, f) => s + (Number(f.data.lstmProbability?.horizonMinutes) || 15),
+              0
+            ) / withLstm.length
+          );
+          const perEng = withLstm
+            .map(
+              (f) =>
+                `${f.eng.label} (${Math.round(Number(f.data.lstmProbability?.upPct) || 33)}%/${Math.round(
+                  Number(f.data.lstmProbability?.downPct) || 33
+                )}%)`
+            )
+            .join(' + ');
+          return {
+            upPct,
+            downPct,
+            holdPct,
+            horizonMinutes: avgHorizon,
+            rationale: `${perEng}: ${
+              withLstm[0].data.lstmProbability?.rationale ||
+              'Konsensus probabilitas LSTM 3 engine (minimal 2/3 sepakat).'
+            }`,
+          };
+        })();
+
+        const firstNonEmpty = (picker: (d: TripleParsedPayload) => string | undefined): string => {
+          for (const item of winningVotes) {
+            const val = picker(item.data);
+            if (val && val.trim()) return val.trim();
+          }
+          for (const item of fulfilled) {
+            const val = picker(item.data);
+            if (val && val.trim()) return val.trim();
+          }
+          return '';
+        };
+
+        const hpTpCandidates = winningVotes
+          .map((v) => Number(v.data.highProbTp))
+          .filter((n) => Number.isFinite(n) && n > 0);
+        const highProbTp =
+          hpTpCandidates.length > 0
+            ? finalSignal === 'SELL'
+              ? Math.max(...hpTpCandidates)
+              : Math.min(...hpTpCandidates)
+            : takeProfit1;
+
+        const highProbTpConfidence = Math.max(
+          85,
+          Math.min(
+            97,
+            Math.round(
+              winningVotes.reduce(
+                (s, v) => s + (Number(v.data.highProbTpConfidence) || 88),
+                0
+              ) / winningVotes.length
+            )
+          )
+        );
+
+        const consensusSetup =
+          finalSignal === 'HOLD'
+            ? `HOLD — Konsensus 2/3 Belum Terpenuhi (${voteStatuses.join(' | ')})`
+            : firstNonEmpty((d) => d.setupPattern) || `Triple Konsensus 2/3 ${finalSignal}`;
+
+        const mergedFactors = [
+          ...voteStatuses,
+          ...winningVotes
+            .flatMap((v) => (Array.isArray(v.data.keyFactors) ? v.data.keyFactors.slice(0, 1) : []))
+            .slice(0, 2),
+        ].slice(0, 5);
+
+        const perEngineSummaries = fulfilled
+          .map((f) => `[${f.eng.label}]: ${f.data.summary || '-'}`)
+          .join(' | ');
+
+        const synthesizedPayload = {
+          signal: finalSignal,
+          confidence: finalConfidence,
+          marketBias: finalBias,
+          positionDecision: finalPosDecision,
+          positionReason:
+            openPositionsCount > 0
+              ? `Triple 2/3 Exit Judge: WinProb=${avgWinProb}%, RevConf=${avgRevConf}% (${voteStatuses.join(
+                  ' | '
+                )}).`
+              : 'Tidak ada posisi aktif.',
+          winProbability: openPositionsCount > 0 ? avgWinProb : undefined,
+          reversalConfidence: openPositionsCount > 0 ? avgRevConf : undefined,
+          highProbTp,
+          highProbTpConfidence,
+          postTpEvaluation: finalPostTpEval,
+          postTpReason: fulfilled
+            .map((f) => f.data.postTpReason || '')
+            .filter(Boolean)
+            .join(' | '),
+          keyLevelsSummary: firstNonEmpty((d) => d.keyLevelsSummary),
+          priceActionSignal: firstNonEmpty((d) => d.priceActionSignal),
+          harmonicPattern: firstNonEmpty((d) => d.harmonicPattern),
+          ...(avgLstmProb ? { lstmProbability: avgLstmProb } : {}),
+          judgeVerdict: consensusStatusNote,
+          indicatorWeighting: `Triple Engine 2/3 Consensus (${fulfilled.length}/3 aktif): ${voteStatuses.join(
+            ' | '
+          )}`,
+          ocrExtractedPrice: firstNonEmpty((d) => d.ocrExtractedPrice),
+          globalSyncSummary: firstNonEmpty((d) => d.globalSyncSummary),
+          macroSummary: firstNonEmpty((d) => d.macroSummary),
+          mtfSummary: firstNonEmpty((d) => d.mtfSummary),
+          entryPrice,
+          stopLoss,
+          takeProfit1,
+          takeProfit2,
+          riskRewardRatio: firstNonEmpty((d) => d.riskRewardRatio) || '1:1.5',
+          setupPattern: consensusSetup,
+          summary: `${consensusStatusNote}. ${perEngineSummaries}`,
+          keyFactors: mergedFactors,
+          invalidatedIf:
+            firstNonEmpty((d) => d.invalidatedIf) || 'Break level invalidasi S/R utama.',
+        };
+
+        rawText = JSON.stringify(synthesizedPayload);
+        usedChartVision = fulfilled.some((f) => f.res.usedChartVision);
+        activeModelName = `openrouter/triple-2of3(${tag}${
+          failedNotes.length > 0 ? ` | ${fulfilled.length}/3 online` : ''
+        })`;
+      };
+
+      const runOpenRouterSpanPplxLingDtConsensus = (cfg: OpenRouterDecisionsConfig) =>
+        runTripleTwoOfThreeConsensus({
+          engines: [
+            {
+              label: 'Span-01-Lite',
+              modelId: cfg.respanModel,
+              run: () => invokeOpenRouterDecisions(cfg, cfg.respanModel, 36_000),
+            },
+            {
+              label: 'PPLX-Decider',
+              modelId: cfg.model,
+              run: () => invokeOpenRouterDecisions(cfg, cfg.model, 36_000),
+            },
+            {
+              label: 'LingDT-Fast',
+              modelId: cfg.lingDtModel,
+              run: () => invokeOpenRouterDecisions(cfg, cfg.lingDtModel, 36_000),
+            },
+          ],
+          tag: 'span-01+pplx+lingdt',
+        });
+
+      const runOpenRouterClefPplx12GptOssConsensus = (cfg: OpenRouterDecisionsConfig) =>
+        runTripleTwoOfThreeConsensus({
+          engines: [
+            {
+              label: 'Clef-Flash',
+              modelId: cfg.clefModel,
+              run: () => invokeOpenRouterDecisions(cfg, cfg.clefModel, 36_000),
+            },
+            {
+              label: 'PPLX-Decider-v1.2',
+              modelId: cfg.pplxV12Model,
+              run: () => invokeOpenRouterDecisions(cfg, cfg.pplxV12Model, 36_000),
+            },
+            {
+              label: 'GPT-OSS-20B',
+              modelId: cfg.gptOssModel,
+              run: () => invokeOpenRouterChat(cfg, cfg.gptOssModel, 42_000),
+            },
+          ],
+          tag: 'clef+pplx-v1.2+gpt-oss-20b',
+        });
 
       interface AiCandidate {
         key: string;
@@ -4201,6 +6150,16 @@ TUGAS KEPUTUSAN MANDIRI AI:
             run: () => runOpenRouterDecisionsEngine(openRouterCfg, openRouterCfg.jevModel),
           },
           {
+            key: 'openrouter-clef',
+            label: `OpenRouter (${openRouterCfg.clefModel})`,
+            run: () => runOpenRouterDecisionsEngine(openRouterCfg, openRouterCfg.clefModel),
+          },
+          {
+            key: 'openrouter-pplx-v12',
+            label: `OpenRouter (${openRouterCfg.pplxV12Model})`,
+            run: () => runOpenRouterDecisionsEngine(openRouterCfg, openRouterCfg.pplxV12Model),
+          },
+          {
             key: 'openrouter-respan',
             label: `OpenRouter (${openRouterCfg.respanModel})`,
             run: () => runOpenRouterDecisionsEngine(openRouterCfg, openRouterCfg.respanModel),
@@ -4209,6 +6168,26 @@ TUGAS KEPUTUSAN MANDIRI AI:
             key: 'openrouter-pplx',
             label: `OpenRouter (${openRouterCfg.model})`,
             run: () => runOpenRouterDecisionsEngine(openRouterCfg, openRouterCfg.model),
+          },
+          {
+            key: 'openrouter-lingdt',
+            label: `OpenRouter (${openRouterCfg.lingDtModel})`,
+            run: () => runOpenRouterDecisionsEngine(openRouterCfg, openRouterCfg.lingDtModel),
+          },
+          {
+            key: 'openrouter-ling',
+            label: `OpenRouter (${openRouterCfg.lingModel})`,
+            run: () => runOpenRouterChatEngine(openRouterCfg, openRouterCfg.lingModel),
+          },
+          {
+            key: 'openrouter-ernie',
+            label: `OpenRouter (${openRouterCfg.ernieModel})`,
+            run: () => runOpenRouterChatEngine(openRouterCfg, openRouterCfg.ernieModel),
+          },
+          {
+            key: 'openrouter-lfm',
+            label: `OpenRouter (${openRouterCfg.lfmModel})`,
+            run: () => runOpenRouterChatEngine(openRouterCfg, openRouterCfg.lfmModel),
           },
           {
             key: 'openrouter-argon',
@@ -4229,6 +6208,11 @@ TUGAS KEPUTUSAN MANDIRI AI:
             key: 'openrouter-kimi',
             label: `OpenRouter (${openRouterCfg.kimiModel})`,
             run: () => runOpenRouterChatEngine(openRouterCfg, openRouterCfg.kimiModel),
+          },
+          {
+            key: 'openrouter-gpt-oss',
+            label: `OpenRouter (${openRouterCfg.gptOssModel})`,
+            run: () => runOpenRouterChatEngine(openRouterCfg, openRouterCfg.gptOssModel),
           }
         );
       }
@@ -4274,14 +6258,10 @@ TUGAS KEPUTUSAN MANDIRI AI:
               err instanceof SyntaxError ||
               (err instanceof OpenRouterError && err.statusCode === 502 && /JSON valid/i.test(err.detail));
             if (isEngineFailureEligibleForRotation(err) || isMissingModel || isBadModelPayload) {
-              airforceEngineCooldownUntil.set(c.key, Date.now() + 60_000);
+              const isRateLimit = err instanceof OpenRouterError && err.statusCode === 429;
+              airforceEngineCooldownUntil.set(c.key, Date.now() + (isRateLimit ? 180_000 : 60_000));
             }
             if (hasMore && (isEngineFailureEligibleForRotation(err) || isMissingModel || isBadModelPayload)) {
-              console.warn(
-                `[AI Rotation] ${c.label} gagal/limit (${
-                  err instanceof Error ? err.message : String(err)
-                }). Beralih ke ${prioritized[i + 1].label}...`
-              );
               continue;
             }
             throw err;
@@ -4332,6 +6312,42 @@ TUGAS KEPUTUSAN MANDIRI AI:
       } else if (requestedProvider === 'OPENROUTER_RESPAN_PPLX') {
         const cfgOr = requireOpenRouter();
         await runOpenRouterRespanPplxAlternating(cfgOr);
+      } else if (requestedProvider === 'OPENROUTER_SPAN_PPLX_LINGDT_CONSENSUS') {
+        const cfgOr = requireOpenRouter();
+        await runOpenRouterSpanPplxLingDtConsensus(cfgOr);
+      } else if (requestedProvider === 'OPENROUTER_FLASH_TRIO') {
+        const cfgOr = requireOpenRouter();
+        await runOpenRouterFlashTrioAlternating(cfgOr);
+      } else if (requestedProvider === 'OPENROUTER_GEMMA_PPLX_CONSENSUS') {
+        const cfgOr = requireOpenRouter();
+        await runOpenRouterGemmaPplxConsensus(cfgOr);
+      } else if (requestedProvider === 'OPENROUTER_CLEF_PPLX12_CONSENSUS') {
+        const cfgOr = requireOpenRouter();
+        await runOpenRouterClefPplx12Consensus(cfgOr);
+      } else if (requestedProvider === 'OPENROUTER_CLEF_PPLX12_GPTOSS_CONSENSUS') {
+        const cfgOr = requireOpenRouter();
+        await runOpenRouterClefPplx12GptOssConsensus(cfgOr);
+      } else if (requestedProvider === 'OPENROUTER_CLEF') {
+        const cfgOr = requireOpenRouter();
+        await runOpenRouterDecisionsEngine(cfgOr, cfgOr.clefModel);
+      } else if (requestedProvider === 'OPENROUTER_PPLX_V12') {
+        const cfgOr = requireOpenRouter();
+        await runOpenRouterDecisionsEngine(cfgOr, cfgOr.pplxV12Model);
+      } else if (requestedProvider === 'OPENROUTER_LINGDT') {
+        const cfgOr = requireOpenRouter();
+        await runOpenRouterDecisionsEngine(cfgOr, cfgOr.lingDtModel);
+      } else if (requestedProvider === 'OPENROUTER_GPT_OSS') {
+        const cfgOr = requireOpenRouter();
+        await runOpenRouterChatEngine(cfgOr, cfgOr.gptOssModel);
+      } else if (requestedProvider === 'OPENROUTER_LING') {
+        const cfgOr = requireOpenRouter();
+        await runOpenRouterChatEngine(cfgOr, cfgOr.lingModel);
+      } else if (requestedProvider === 'OPENROUTER_ERNIE') {
+        const cfgOr = requireOpenRouter();
+        await runOpenRouterChatEngine(cfgOr, cfgOr.ernieModel);
+      } else if (requestedProvider === 'OPENROUTER_LFM') {
+        const cfgOr = requireOpenRouter();
+        await runOpenRouterChatEngine(cfgOr, cfgOr.lfmModel);
       } else if (requestedProvider === 'OPENROUTER_HEYGEN') {
         const cfgOr = requireOpenRouter();
         await runOpenRouterDecisionsEngine(cfgOr, cfgOr.heygenModel);
@@ -4379,6 +6395,15 @@ TUGAS KEPUTUSAN MANDIRI AI:
         postTpEvaluation?: string;
         postTpReason?: string;
         keyLevelsSummary?: string;
+        priceActionSignal?: string;
+        harmonicPattern?: string;
+        lstmProbability?: {
+          upPct?: number;
+          downPct?: number;
+          holdPct?: number;
+          horizonMinutes?: number;
+          rationale?: string;
+        };
         judgeVerdict: string;
         indicatorWeighting: string;
         entryPrice: number;
@@ -4514,9 +6539,9 @@ TUGAS KEPUTUSAN MANDIRI AI:
         entryPrice = refPrice;
       }
 
-      const slMult = isScalpMode ? 1.0 : 1.5;
-      const tp1Mult = isScalpMode ? 1.35 : 2.0;
-      const tp2Mult = isScalpMode ? 2.2 : 3.2;
+      const slMult = isUltraUnified ? 0.85 : isScalpMode ? 1.0 : 1.5;
+      const tp1Mult = isUltraUnified ? 1.15 : isScalpMode ? 1.35 : 2.0;
+      const tp2Mult = isUltraUnified ? 1.85 : isScalpMode ? 2.2 : 3.2;
 
       const parsedSl = Number(parsed.stopLoss);
       const parsedTp1 = Number(parsed.takeProfit1);
@@ -4550,11 +6575,17 @@ TUGAS KEPUTUSAN MANDIRI AI:
       if (normalizedSignal === 'BUY') {
         if (stopLoss >= entryPrice) stopLoss = Number((entryPrice - atrValue * slMult).toFixed(2));
         if (takeProfit1 <= entryPrice) takeProfit1 = Number((entryPrice + atrValue * tp1Mult).toFixed(2));
-        if (takeProfit2 <= takeProfit1) takeProfit2 = Number((entryPrice + atrValue * tp2Mult).toFixed(2));
+        if (isUltraUnified && takeProfit1 - entryPrice > atrValue * 1.95) {
+          takeProfit1 = Number((entryPrice + atrValue * tp1Mult).toFixed(2));
+        }
+        if (takeProfit2 <= takeProfit1) takeProfit2 = Number((takeProfit1 + atrValue * 0.7).toFixed(2));
       } else if (normalizedSignal === 'SELL') {
         if (stopLoss <= entryPrice) stopLoss = Number((entryPrice + atrValue * slMult).toFixed(2));
         if (takeProfit1 >= entryPrice) takeProfit1 = Number((entryPrice - atrValue * tp1Mult).toFixed(2));
-        if (takeProfit2 >= takeProfit1) takeProfit2 = Number((entryPrice - atrValue * tp2Mult).toFixed(2));
+        if (isUltraUnified && entryPrice - takeProfit1 > atrValue * 1.95) {
+          takeProfit1 = Number((entryPrice - atrValue * tp1Mult).toFixed(2));
+        }
+        if (takeProfit2 >= takeProfit1) takeProfit2 = Number((takeProfit1 - atrValue * 0.7).toFixed(2));
       }
 
       const positionReason =
@@ -4595,8 +6626,79 @@ TUGAS KEPUTUSAN MANDIRI AI:
       if (calibratedConf >= 90 && (normalizedBias === 'RANGING' || isWeakAdx || normalizedSignal === 'HOLD')) {
         calibratedConf = Math.min(calibratedConf, normalizedSignal === 'HOLD' ? 68 : 74);
       }
+      const normalizedLstmProbability = (() => {
+        const raw = parsed.lstmProbability;
+        if (!raw || typeof raw !== 'object') return undefined;
+        const upRaw = Number(raw.upPct);
+        const dnRaw = Number(raw.downPct);
+        const holdRaw = Number(raw.holdPct);
+        if (!Number.isFinite(upRaw) && !Number.isFinite(dnRaw)) return undefined;
+        let up = Math.max(0, Math.min(100, Math.round(Number.isFinite(upRaw) ? upRaw : 33)));
+        let dn = Math.max(0, Math.min(100, Math.round(Number.isFinite(dnRaw) ? dnRaw : 33)));
+        let hd = Math.max(
+          0,
+          Math.min(100, Math.round(Number.isFinite(holdRaw) ? holdRaw : 100 - up - dn))
+        );
+        const sum = up + dn + hd;
+        if (sum > 0 && sum !== 100) {
+          up = Math.round((up / sum) * 100);
+          dn = Math.round((dn / sum) * 100);
+          hd = Math.max(0, 100 - up - dn);
+        }
+        const horizonMin = Number.isFinite(Number(raw.horizonMinutes))
+          ? Math.max(1, Math.min(isUltraUnified ? 15 : 120, Math.round(Number(raw.horizonMinutes))))
+          : isUltraUnified
+          ? 5
+          : isScalpMode
+          ? 15
+          : 30;
+        return {
+          upPct: up,
+          downPct: dn,
+          holdPct: hd,
+          horizonMinutes: horizonMin,
+          rationale: String(
+            raw.rationale ||
+              `Perhitungan LSTM independen AI (${horizonMin}m): Up ${up}% · Down ${dn}% · Hold ${hd}%.`
+          ),
+        };
+      })();
+
       let adaptiveFilterNote = '';
       if (
+        strategyFocus === 'UNIFIED_8IN1' &&
+        openPositionsCount === 0 &&
+        normalizedSignal !== 'HOLD'
+      ) {
+        const alignedVotes =
+          normalizedSignal === 'BUY' ? unified8In1.buyVotes : unified8In1.sellVotes;
+        const opposingVotes =
+          normalizedSignal === 'BUY' ? unified8In1.sellVotes : unified8In1.buyVotes;
+        const srBlocked =
+          (normalizedSignal === 'BUY' && unified8In1.buyBlockedByRes) ||
+          (normalizedSignal === 'SELL' && unified8In1.sellBlockedBySup);
+        const lstmAligned = normalizedLstmProbability
+          ? normalizedSignal === 'BUY'
+            ? normalizedLstmProbability.upPct >= 50 &&
+              normalizedLstmProbability.upPct > normalizedLstmProbability.downPct
+            : normalizedLstmProbability.downPct >= 50 &&
+              normalizedLstmProbability.downPct > normalizedLstmProbability.upPct
+          : true;
+        if (
+          calibratedConf < 76 ||
+          alignedVotes < 5 ||
+          opposingVotes > alignedVotes ||
+          srBlocked ||
+          !lstmAligned
+        ) {
+          normalizedSignal = 'HOLD';
+          adaptiveFilterNote = ` [Filter 11-Pilar Complete: ${alignedVotes}/11 pilar searah (lawan ${opposingVotes}/11${
+            srBlocked ? ', terhalang S/R dekat' : ''
+          }${!lstmAligned ? ', probabilitas LSTM belum ≥50% searah' : ''}) -> ditahan HOLD.]`;
+        } else {
+          adaptiveFilterNote = ` [11-Pilar Complete Tervalidasi: ${alignedVotes}/11 pilar searah]`;
+        }
+      } else if (
         strategyFocus === 'ADAPTIVE_SCALP' &&
         openPositionsCount === 0 &&
         normalizedSignal !== 'HOLD' &&
@@ -4617,6 +6719,7 @@ TUGAS KEPUTUSAN MANDIRI AI:
       const dataSources = Array.from(
         new Set([
           ...globalSync.quotes.map((q) => q.source),
+          ...(fastBullPosition.available ? ['FastBull Order & Position Book (list-position XAUUSD)'] : []),
           ...(macroContext.dxyPrice !== null ? ['Yahoo Finance (DXY / ^TNX / ^GSPC)'] : []),
           ...macroContext.headlines.slice(0, 3).map((h) => `Berita: ${h.source}`),
         ])
@@ -4714,6 +6817,48 @@ TUGAS KEPUTUSAN MANDIRI AI:
             : 88;
       }
 
+      const recoveryPlan = computeMathematicalRecoveryPlan({
+        enabled: body.eaLotParams?.mathRecoveryEnabled ?? true,
+        accountBalance: Number(body.accountBalance) || 10000,
+        lotMode: body.eaLotParams?.lotMode ?? 'RISK_PERCENT',
+        fixedLot: body.eaLotParams?.fixedLot ?? 0.05,
+        riskPercent: body.eaLotParams?.riskPercent ?? body.riskPercent ?? 1.0,
+        martingaleEnabled: body.eaLotParams?.martingaleEnabled ?? true,
+        martingaleMultiplier: body.eaLotParams?.martingaleMultiplier ?? 2.0,
+        maxRecoverySteps: body.eaLotParams?.mathRecoveryMaxSteps ?? 3,
+        bid: snapshot.quote.bid,
+        ask: snapshot.quote.ask,
+        atr: atrValue,
+        nearestSupport: chartStructure.nearestSupport?.price ?? null,
+        nearestResistance: chartStructure.nearestResistance?.price ?? null,
+        openPositions: openDetailList.map((p) => ({
+          side: p.side,
+          lots: p.lots,
+          entryPrice: p.entryPrice,
+          floatingPnlUsd: p.floatingPnlUsd,
+        })),
+        positionDecision: normalizedPosDecision,
+        reversalConfidence,
+        recentClosedTrades: recentClosedList,
+        aiSignal: normalizedSignal,
+        marketBias: normalizedBias,
+      });
+
+      let finalTp1WithRecovery = takeProfit1;
+      let finalTp2WithRecovery = takeProfit2;
+      if (
+        recoveryPlan?.isActive &&
+        recoveryPlan.mode === 'EXECUTE_NOW' &&
+        normalizedSignal !== 'HOLD'
+      ) {
+        finalTp1WithRecovery = recoveryPlan.recoveryTp;
+        if (normalizedSignal === 'BUY' && finalTp2WithRecovery <= finalTp1WithRecovery) {
+          finalTp2WithRecovery = Number((finalTp1WithRecovery + atrValue * 0.7).toFixed(2));
+        } else if (normalizedSignal === 'SELL' && finalTp2WithRecovery >= finalTp1WithRecovery) {
+          finalTp2WithRecovery = Number((finalTp1WithRecovery - atrValue * 0.7).toFixed(2));
+        }
+      }
+
       const analysis: EaAnalysisResult = {
         id: `ea_${Date.now()}`,
         timestamp: Date.now(),
@@ -4724,8 +6869,8 @@ TUGAS KEPUTUSAN MANDIRI AI:
         marketBias: normalizedBias,
         entryPrice,
         stopLoss,
-        takeProfit1,
-        takeProfit2,
+        takeProfit1: finalTp1WithRecovery,
+        takeProfit2: finalTp2WithRecovery,
         riskRewardRatio: parsed.riskRewardRatio || '1:1.4',
         setupPattern: antiHedgeNote
           ? 'HOLD — Jaga Posisi Aktif'
@@ -4752,15 +6897,33 @@ TUGAS KEPUTUSAN MANDIRI AI:
         postTpEvaluation: normalizedPostTpEval,
         postTpReason,
         keyLevelsSummary: parsed.keyLevelsSummary || fallbackSrSummary,
+        priceActionSignal:
+          parsed.priceActionSignal ||
+          `${unified8In1.paVote} — ${unified8In1.paDetail}`,
+        harmonicPattern:
+          parsed.harmonicPattern ||
+          (chartStructure.harmonicPattern
+            ? `${chartStructure.harmonicPattern.direction} ${chartStructure.harmonicPattern.name} (${chartStructure.harmonicPattern.status}) PRZ ${chartStructure.harmonicPattern.przLow}-${chartStructure.harmonicPattern.przHigh}`
+            : 'Belum ada pola Harmonic X-A-B-C-D yang mencapai zona PRZ aktif'),
+        ...(normalizedLstmProbability ? { lstmProbability: normalizedLstmProbability } : {}),
         ocrExtractedPrice:
           parsed.ocrExtractedPrice ||
           `Live Chart ${snapshot.quote.source}: Bid ${snapshot.quote.bid.toFixed(
             2
           )} / Ask ${snapshot.quote.ask.toFixed(2)}`,
         globalSyncSummary: parsed.globalSyncSummary || globalSync.summary,
+        fastBullPositionSummary: fastBullPosition.summary,
         macroSummary: parsed.macroSummary || defaultMacroSummary,
         mtfSummary: parsed.mtfSummary || mtfData.compactSummary,
-        lockProfitPlan,
+        ...(recoveryPlan ? { recoveryPlan } : {}),
+        lockProfitPlan: {
+          lock25Price: Number(
+            (entryPrice + lockDir * Math.abs(finalTp1WithRecovery - entryPrice) * 0.25).toFixed(2)
+          ),
+          lock50Price: Number(
+            (entryPrice + lockDir * Math.abs(finalTp1WithRecovery - entryPrice) * 0.5).toFixed(2)
+          ),
+        },
         dataSources,
       };
 
@@ -4782,6 +6945,12 @@ TUGAS KEPUTUSAN MANDIRI AI:
         normalizedPostTpEval,
         safePostTpReason,
         highProbTp !== undefined ? highProbTp.toFixed(2) : '0.00',
+        recoveryPlan?.isActive && recoveryPlan.mode === 'EXECUTE_NOW'
+          ? recoveryPlan.recoveryLots.toFixed(2)
+          : '0.00',
+        recoveryPlan?.isActive && recoveryPlan.mode === 'EXECUTE_NOW'
+          ? recoveryPlan.recoveryTp.toFixed(2)
+          : '0.00',
       ].join('|');
 
       if (useStreamKeepAlive) {
