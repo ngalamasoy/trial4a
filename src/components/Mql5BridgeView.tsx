@@ -168,6 +168,7 @@ export const Mql5BridgeView: React.FC<Mql5BridgeViewProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          symbol: config.tradingSymbol ?? 'XAU/USD',
           strategyFocus: config.strategyFocus,
           fullAiControl: config.fullAiControl ?? true,
           noSlAiExit: config.noSlAiExit ?? true,
@@ -487,7 +488,7 @@ export const Mql5BridgeView: React.FC<Mql5BridgeViewProps> = ({
                     <strong className="text-[#F8FAFC]">{mt5Status.profile?.login}</strong> pada server{' '}
                     <strong className="text-[#F8FAFC]">{mt5Status.profile?.server}</strong>.
                     <br />
-                    3. Pasang EA ke chart <strong className="text-[#F8FAFC]">XAUUSD M5</strong> dan aktifkan{' '}
+                    3. Pasang EA ke chart <strong className="text-[#F8FAFC]">XAUUSD / GBPUSD / EURUSD / BTCUSD</strong> (M1–H1) dan aktifkan{' '}
                     <em>Algo Trading</em>. Status di halaman ini akan otomatis berubah menjadi{' '}
                     <strong className="text-[#10B981]">Terhubung Real-Time</strong>.
                   </p>
@@ -550,7 +551,7 @@ export const Mql5BridgeView: React.FC<Mql5BridgeViewProps> = ({
             <li>
               Salin <code className="text-[#E6EDF3] font-mono">AurumGeminiBridge.dll</code> ke{' '}
               <code className="text-[#E6EDF3] font-mono">MQL5\Libraries\</code>, lalu centang{' '}
-              <strong className="text-[#E6EDF3]">Allow DLL imports</strong> saat attach EA ke chart XAUUSD M5.
+              <strong className="text-[#E6EDF3]">Allow DLL imports</strong> saat attach EA ke chart XAUUSD, GBPUSD, EURUSD, atau BTCUSD.
             </li>
           </ol>
         </section>
@@ -570,7 +571,7 @@ export const Mql5BridgeView: React.FC<Mql5BridgeViewProps> = ({
               <code className="text-[#D4AF37] font-mono break-all">{origin}</code>.
             </li>
             <li>
-              Saat memasang EA ke chart XAUUSD M5, ubah input{' '}
+              Saat memasang EA ke chart (XAUUSD / GBPUSD / EURUSD / BTCUSD), ubah input{' '}
               <code className="text-[#E6EDF3] font-mono">InpUseDll = false</code>.
             </li>
           </ol>

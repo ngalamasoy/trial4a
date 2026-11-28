@@ -2,20 +2,30 @@ import React, { useState } from 'react';
 import { Check, Pencil, X } from 'lucide-react';
 import {
   BROKER_FEEDS,
+  CHART_TIMEFRAME_OPTIONS,
+  SYMBOL_OPTIONS,
+  formatPairPrice,
+  getSymbolMeta,
+  getTvSymbolForBrokerAndPair,
+  normalizeTradingSymbol,
   type BrokerFeedId,
   type ChartTimeframe,
   type IndicatorSnapshot,
   type MacroContext,
   type MarketQuote,
   type Mt5BridgeStatus,
+  type TradingSymbol,
 } from '../types/trading.ts';
 
 interface MarketStripProps {
+  symbol: TradingSymbol;
+  onChangeSymbol?: (sym: TradingSymbol) => void;
   quote: MarketQuote | null;
   indicators: IndicatorSnapshot | null;
   macroContext?: MacroContext | null;
   brokerFeed: BrokerFeedId;
   timeframe: ChartTimeframe;
+  onChangeTimeframe?: (tf: ChartTimeframe) => void;
   onChangeBrokerFeed: (broker: BrokerFeedId) => void;
   balance: number;
   equity: number;
@@ -34,11 +44,14 @@ function formatCountdown(seconds: number): string {
 }
 
 export const MarketStrip: React.FC<MarketStripProps> = ({
+  symbol,
+  onChangeSymbol,
   quote,
   indicators,
   macroContext,
   brokerFeed,
   timeframe,
+  onChangeTimeframe,
   onChangeBrokerFeed,
   balance,
   equity,
@@ -52,6 +65,8 @@ export const MarketStrip: React.FC<MarketStripProps> = ({
   const [editingBalance, setEditingBalance] = useState(false);
   const [balanceDraft, setBalanceDraft] = useState('');
 
+  const activeSym = normalizeTradingSymbol(symbol);
+  const symMeta = getSymbolMeta(activeSym);
   const isPositiveChange = (quote?.change24h ?? 0) >= 0;
   const isPositiveFloating = floatingPnl >= 0;
   const activeBroker = BROKER_FEEDS.find((b) => b.id === brokerFeed);
@@ -75,12 +90,54 @@ export const MarketStrip: React.FC<MarketStripProps> = ({
       aria-label="Ringkasan pasar dan akun"
       className="border-b border-white/[0.08] bg-[#111620] px-4 lg:px-6 py-2.5 flex flex-wrap items-center justify-between gap-x-8 gap-y-2 text-xs"
     >
-      {/* Left: Pair, Broker Reference Selector, Live Bid/Ask, Spread, 24h Change, Candle Countdown */}
+      {/* Left: Pair, Timeframe Selector, Broker Reference Selector, Live Bid/Ask, Spread, 24h Change, Candle Countdown */}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5">
         <div className="flex items-center gap-2 whitespace-nowrap">
-          <span className="text-sm font-bold text-[#F8FAFC]">XAU/USD</span>
+          {onChangeSymbol ? (
+            <>
+              <label htmlFor="market-strip-pair-select" className="sr-only">
+                Pilih Pair Trading
+              </label>
+              <select
+                id="market-strip-pair-select"
+                value={activeSym}
+                onChange={(e) => onChangeSymbol(e.target.value as TradingSymbol)}
+                title="Pilih Pair Trading (XAU/USD, GBP/USD, EUR/USD, BTC/USD)"
+                className="px-2 py-1 text-xs font-bold rounded bg-[#0B0E14] border border-[#D4AF37]/60 text-[#F8FAFC] hover:border-[#D4AF37] focus:outline-none focus:border-[#D4AF37] cursor-pointer"
+              >
+                {SYMBOL_OPTIONS.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </>
+          ) : (
+            <span className="text-sm font-bold text-[#F8FAFC]">{activeSym}</span>
+          )}
           <span className="text-[#94A3B8]">·</span>
-          <span className="font-mono text-[#D4AF37] font-semibold">{timeframe}</span>
+          {onChangeTimeframe ? (
+            <>
+              <label htmlFor="market-strip-tf-select" className="sr-only">
+                Pilih Timeframe Chart
+              </label>
+              <select
+                id="market-strip-tf-select"
+                value={timeframe}
+                onChange={(e) => onChangeTimeframe(e.target.value as ChartTimeframe)}
+                title="Pilih Timeframe Chart (M1, M5, M15, M30, H1)"
+                className="px-2 py-1 text-xs font-mono font-semibold rounded bg-[#0B0E14] border border-[#D4AF37]/45 text-[#D4AF37] hover:border-[#D4AF37] focus:outline-none focus:border-[#D4AF37] cursor-pointer"
+              >
+                {CHART_TIMEFRAME_OPTIONS.map((tf) => (
+                  <option key={tf.id} value={tf.id}>
+                    {tf.fullLabel}
+                  </option>
+                ))}
+              </select>
+            </>
+          ) : (
+            <span className="font-mono text-[#D4AF37] font-semibold">{timeframe}</span>
+          )}
           <span className="text-[#94A3B8]">·</span>
           <label htmlFor="broker-feed-select" className="sr-only">
             Referensi Harga Broker
@@ -92,11 +149,14 @@ export const MarketStrip: React.FC<MarketStripProps> = ({
             title={activeBroker?.description || 'Pilih Referensi Harga Broker'}
             className="px-2 py-1 text-xs font-medium rounded bg-[#0B0E14] border border-[#D4AF37]/35 text-[#F8FAFC] hover:border-[#D4AF37] focus:outline-none focus:border-[#D4AF37] cursor-pointer"
           >
-            {BROKER_FEEDS.map((b) => (
-              <option key={b.id} value={b.id}>
-                {b.tvSymbol ? `${b.name} (${b.tvSymbol})` : b.name}
-              </option>
-            ))}
+            {BROKER_FEEDS.map((b) => {
+              const mappedTv = getTvSymbolForBrokerAndPair(b.id, activeSym);
+              return (
+                <option key={b.id} value={b.id}>
+                  {mappedTv ? `${b.name} (${mappedTv})` : b.name}
+                </option>
+              );
+            })}
           </select>
           <span
             className={`text-[11px] font-medium ${
@@ -121,26 +181,26 @@ export const MarketStrip: React.FC<MarketStripProps> = ({
           <div>
             <span className="text-[#94A3B8] mr-1.5">Bid</span>
             <span className="text-sm font-semibold text-[#F8FAFC]">
-              {quote ? quote.bid.toFixed(2) : '----.--'}
+              {quote ? formatPairPrice(quote.bid, activeSym) : '----.--'}
             </span>
           </div>
           <div>
             <span className="text-[#94A3B8] mr-1.5">Ask</span>
             <span className="text-sm font-semibold text-[#F8FAFC]">
-              {quote ? quote.ask.toFixed(2) : '----.--'}
+              {quote ? formatPairPrice(quote.ask, activeSym) : '----.--'}
             </span>
           </div>
           <div>
             <span className="text-[#94A3B8] mr-1.5">Spread</span>
             <span className="text-[#E6EDF3]">
-              {quote ? `$${quote.spread.toFixed(2)}` : '--'}
+              {quote ? formatPairPrice(quote.spread, activeSym) : '--'}
             </span>
           </div>
           <div>
             <span className="text-[#94A3B8] mr-1.5">24j</span>
             <span className={isPositiveChange ? 'text-[#10B981]' : 'text-[#EF4444]'}>
               {quote
-                ? `${isPositiveChange ? '+' : ''}${quote.change24h.toFixed(2)} (${
+                ? `${isPositiveChange ? '+' : ''}${quote.change24h.toFixed(symMeta.decimals)} (${
                     isPositiveChange ? '+' : ''
                   }${quote.changePercent24h.toFixed(2)}%)`
                 : '--'}
@@ -155,7 +215,7 @@ export const MarketStrip: React.FC<MarketStripProps> = ({
           {indicators?.atr14 !== null && indicators?.atr14 !== undefined && (
             <div className="hidden xl:block">
               <span className="text-[#94A3B8] mr-1.5">ATR14</span>
-              <span className="text-[#E6EDF3]">${indicators.atr14.toFixed(2)}</span>
+              <span className="text-[#E6EDF3]">{indicators.atr14.toFixed(symMeta.decimals)}</span>
             </div>
           )}
           {indicators?.rsi14 !== null && indicators?.rsi14 !== undefined && (

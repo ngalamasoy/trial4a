@@ -3,9 +3,17 @@ import { RotateCcw, Wallet, Zap } from 'lucide-react';
 import {
   AI_PROVIDER_OPTIONS,
   BROKER_FEEDS,
+  CHART_TIMEFRAME_OPTIONS,
+  SYMBOL_OPTIONS,
+  getSymbolMeta,
+  getTimeframeForCadence,
+  getTvSymbolForBrokerAndPair,
+  normalizeTradingSymbol,
   type AiProviderMode,
   type BrokerFeedId,
+  type ChartTimeframe,
   type EaConfig,
+  type TradingSymbol,
 } from '../types/trading.ts';
 
 interface EaSettingsViewProps {
@@ -65,15 +73,18 @@ export const EaSettingsView: React.FC<EaSettingsViewProps> = ({
     });
   };
 
+  const activeSym = normalizeTradingSymbol(config.tradingSymbol);
+  const symMeta = getSymbolMeta(activeSym);
+
   return (
     <div className="max-w-4xl mx-auto p-4 lg:p-6 space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/[0.08] pb-4">
         <div>
           <h1 className="text-xl font-semibold text-[#F8FAFC]">
-            Parameter Expert Advisor XAU/USD M5
+            Parameter Expert Advisor ({activeSym})
           </h1>
           <p className="text-xs text-[#94A3B8] mt-1">
-            Atur modal balance simulasi, manajemen risiko, referensi harga broker, interval pemindaian Gemini, strategi scalping, dan proteksi breakeven/trailing.
+            Atur pair trading aktif (XAU/USD, GBP/USD, EUR/USD, BTC/USD), modal balance simulasi, manajemen risiko, referensi harga broker, interval pemindaian AI, dan proteksi breakeven/trailing.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -100,8 +111,32 @@ export const EaSettingsView: React.FC<EaSettingsViewProps> = ({
         {/* Strategi & Frekuensi Gemini */}
         <section className="bg-[#111620] border border-white/[0.08] rounded-lg p-5 space-y-4">
           <h2 className="text-sm font-semibold text-[#F8FAFC] border-b border-white/[0.06] pb-2.5">
-            Strategi, Broker &amp; Jadwal Analisa Gemini
+            Pair, Strategi, Broker &amp; Jadwal Analisa AI
           </h2>
+
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[#E6EDF3]">
+              Pair Trading Aktif
+            </label>
+            <select
+              value={activeSym}
+              onChange={(e) =>
+                onUpdateConfig({
+                  tradingSymbol: e.target.value as TradingSymbol,
+                })
+              }
+              className="w-full px-3 py-2 text-xs font-mono font-semibold rounded-md bg-[#0B0E14] border border-[#D4AF37]/45 text-[#D4AF37] focus:outline-none focus:border-[#D4AF37]"
+            >
+              {SYMBOL_OPTIONS.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label} — {opt.description}
+                </option>
+              ))}
+            </select>
+            <p className="text-[11px] text-[#94A3B8]">
+              Presisi {symMeta.decimals} desimal · Contract size {symMeta.contractSize.toLocaleString('en-US')} · FastBull/Depth sinkron otomatis.
+            </p>
+          </div>
 
           <div className="space-y-1.5">
             <label className="block text-xs font-medium text-[#E6EDF3]">
@@ -116,11 +151,14 @@ export const EaSettingsView: React.FC<EaSettingsViewProps> = ({
               }
               className="w-full px-3 py-2 text-xs rounded-md bg-[#0B0E14] border border-white/[0.1] text-[#F8FAFC] focus:outline-none focus:border-[#D4AF37]"
             >
-              {BROKER_FEEDS.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.tvSymbol ? `${b.name} — ${b.tvSymbol}` : `${b.name} — ${b.description}`}
-                </option>
-              ))}
+              {BROKER_FEEDS.map((b) => {
+                const tvSym = getTvSymbolForBrokerAndPair(b.id, activeSym);
+                return (
+                  <option key={b.id} value={b.id}>
+                    {tvSym ? `${b.name} — ${tvSym}` : `${b.name} — ${b.description}`}
+                  </option>
+                );
+              })}
             </select>
           </div>
 
@@ -162,21 +200,55 @@ export const EaSettingsView: React.FC<EaSettingsViewProps> = ({
 
           <div className="space-y-1.5">
             <label className="block text-xs font-medium text-[#E6EDF3]">
+              Timeframe Chart Utama (M1 · M5 · M15 · M30 · H1)
+            </label>
+            <select
+              value={config.chartTimeframe ?? getTimeframeForCadence(config.analyzeCadence)}
+              onChange={(e) => {
+                const tf = e.target.value as ChartTimeframe;
+                const patch: Partial<EaConfig> = { chartTimeframe: tf };
+                if (tf === 'M15') patch.analyzeCadence = '900S';
+                else if (tf === 'M30') patch.analyzeCadence = '1800S';
+                else if (tf === 'H1') patch.analyzeCadence = '3600S';
+                else if (
+                  config.analyzeCadence === '900S' ||
+                  config.analyzeCadence === '1800S' ||
+                  config.analyzeCadence === '3600S'
+                ) {
+                  patch.analyzeCadence = 'CANDLE_CLOSE';
+                }
+                onUpdateConfig(patch);
+              }}
+              className="w-full px-3 py-2 text-xs font-mono rounded-md bg-[#0B0E14] border border-[#D4AF37]/35 text-[#D4AF37] font-semibold focus:outline-none focus:border-[#D4AF37]"
+            >
+              {CHART_TIMEFRAME_OPTIONS.map((tf) => (
+                <option key={tf.id} value={tf.id}>
+                  {tf.fullLabel}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[#E6EDF3]">
               Interval Auto-Scan Chart
             </label>
             <select
               value={config.analyzeCadence}
-              onChange={(e) =>
-                onUpdateConfig({
-                  analyzeCadence: e.target.value as EaConfig['analyzeCadence'],
-                })
-              }
+              onChange={(e) => {
+                const cadence = e.target.value as EaConfig['analyzeCadence'];
+                const patch: Partial<EaConfig> = { analyzeCadence: cadence };
+                if (cadence === '900S' || cadence === '1800S' || cadence === '3600S') {
+                  patch.chartTimeframe = getTimeframeForCadence(cadence);
+                }
+                onUpdateConfig(patch);
+              }}
               className="w-full px-3 py-2 text-xs rounded-md bg-[#0B0E14] border border-white/[0.1] text-[#F8FAFC] focus:outline-none focus:border-[#D4AF37]"
             >
-              <option value="30S">Setiap 30 Detik — Chart M5 (Rekomendasi Scalping)</option>
-              <option value="60S">Setiap 60 Detik — Chart M5</option>
-              <option value="180S">Setiap 3 Menit — Chart M5</option>
-              <option value="CANDLE_CLOSE">Setiap Candle M5 Tutup (5 Menit — Chart M5)</option>
+              <option value="30S">Setiap 30 Detik — Sesuai Timeframe Aktif</option>
+              <option value="60S">Setiap 60 Detik — Sesuai Timeframe Aktif</option>
+              <option value="180S">Setiap 3 Menit — Sesuai Timeframe Aktif</option>
+              <option value="CANDLE_CLOSE">Setiap Tutup Candle Timeframe Aktif (M1/M5/M15/M30/H1)</option>
               <option value="900S">Setiap 15 Menit — Chart M15 (Hemat Token)</option>
               <option value="1800S">Setiap 30 Menit — Chart M30 (Lebih Hemat Token)</option>
               <option value="3600S">Setiap 60 Menit / 1 Jam — Chart H1 (Super Hemat Token)</option>
@@ -329,7 +401,7 @@ export const EaSettingsView: React.FC<EaSettingsViewProps> = ({
               className="w-full accent-[#D4AF37]"
             />
             <p className="text-[11px] text-[#94A3B8]">
-              Untuk scalping cepat XAU/USD disarankan 0.8x - 1.0x ATR agar profit cepat terkunci.
+              Untuk scalping cepat {activeSym} disarankan 0.8x - 1.0x ATR agar profit cepat terkunci.
             </p>
           </div>
         </section>
@@ -464,7 +536,13 @@ export const EaSettingsView: React.FC<EaSettingsViewProps> = ({
           ) : (
             <div className="space-y-1.5">
               <label className="block text-xs font-medium text-[#E6EDF3]">
-                Ukuran Lot Tetap (Standard 1.00 = 100 oz)
+                Ukuran Lot Tetap (
+                {activeSym === 'XAU/USD'
+                  ? 'Standard 1.00 = 100 oz'
+                  : activeSym === 'BTC/USD'
+                  ? 'Standard 1.00 = 1 BTC'
+                  : 'Standard 1.00 = 100,000 unit ($10/pip)'}
+                )
               </label>
               <input
                 type="number"

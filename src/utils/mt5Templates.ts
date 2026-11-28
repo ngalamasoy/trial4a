@@ -337,14 +337,14 @@ double NormalizeVolume(double reqLot)
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   if(Period() != PERIOD_M5)
+   if(Period() != PERIOD_M1 && Period() != PERIOD_M5 && Period() != PERIOD_M15 && Period() != PERIOD_M30 && Period() != PERIOD_H1)
    {
-      Print("[AurumEA Scalper] Peringatan: Pasang di chart XAUUSD M5 untuk akurasi optimal.");
+      PrintFormat("[AurumEA Scalper] Peringatan: Pasang pada %s timeframe M1/M5/M15/M30/H1 untuk akurasi optimal.", _Symbol);
    }
 
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(25);
-   g_atrHandle = iATR(_Symbol, PERIOD_M5, 14);
+   g_atrHandle = iATR(_Symbol, _Period, 14);
 
    EventSetTimer(1);
    if(InpExecutionMode != MODE_STANDALONE_AI)
@@ -579,11 +579,11 @@ void ExecuteCopiedOrder(const string action, double rawLots, double reqSl, doubl
       ok = trade.Sell(lots, _Symbol, bid, sl, tp, cmt);
 
    if(ok)
-      PrintFormat("[AurumEA Copy] %s %.2f lot @ %.2f | SL=%.2f | TP=%.2f | %s",
-                  action, lots, execPrice, sl, tp, cmt);
+      PrintFormat("[AurumEA Copy] %s %s %.2f lot @ %.*f | SL=%.*f | TP=%.*f | %s",
+                  _Symbol, action, lots, digits, execPrice, digits, sl, digits, tp, cmt);
    else
-      PrintFormat("[AurumEA Copy GAGAL] %s %.2f lot | Retcode=%d (%s)",
-                  action, lots, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+      PrintFormat("[AurumEA Copy GAGAL] %s %s %.2f lot | Retcode=%d (%s)",
+                  _Symbol, action, lots, trade.ResultRetcode(), trade.ResultRetcodeDescription());
 }
 
 //+------------------------------------------------------------------+
@@ -668,7 +668,7 @@ void ModifyPositionsTpBySide(const string side, double reqTp, ulong ticketHint, 
          if(MathAbs(curTp - newTp) >= point)
          {
             if(trade.PositionModify(ticketHint, curSl, newTp))
-               PrintFormat("[AurumEA Copy] TP posisi #%I64u disamakan -> %.2f", ticketHint, newTp);
+               PrintFormat("[AurumEA Copy] TP posisi #%I64u disamakan -> %.*f", ticketHint, digits, newTp);
          }
          return;
       }
@@ -694,7 +694,7 @@ void ModifyPositionsTpBySide(const string side, double reqTp, ulong ticketHint, 
       }
    }
    if(updated > 0)
-      PrintFormat("[AurumEA TP Sync] %d posisi %s diperbarui TP -> %.2f (Prob >=85%%)", updated, side, newTp);
+      PrintFormat("[AurumEA TP Sync] %d posisi %s diperbarui TP -> %.*f (Prob >=85%%)", updated, side, digits, newTp);
 }
 
 //+------------------------------------------------------------------+
@@ -848,7 +848,8 @@ string GetActiveTimeframeCode()
    if(sec >= 3600) return "H1";
    if(sec >= 1800) return "M30";
    if(sec >= 900)  return "M15";
-   return "M5";
+   if(sec >= 300)  return "M5";
+   return "M1";
 }
 
 //+------------------------------------------------------------------+
@@ -916,7 +917,7 @@ string BuildMt5PayloadJson()
 {
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    ENUM_TIMEFRAMES chartTf = _Period;
-   if(PeriodSeconds(chartTf) < 300) chartTf = PERIOD_M5;
+   if(PeriodSeconds(chartTf) < 60) chartTf = PERIOD_M5;
    string tfCandlesJson = BuildCandlesArrayJson(chartTf, 60, digits);
    if(StringLen(tfCandlesJson) < 20) return "";
 
@@ -966,7 +967,8 @@ string BuildMt5PayloadJson()
    );
 
    return StringFormat(
-      "{\\"strategyFocus\\":\\"%s\\",\\"aiProvider\\":\\"%s\\",\\"aiThinkingHigh\\":%s,\\"timeframe\\":\\"%s\\",\\"fullAiControl\\":%s,\\"noSlAiExit\\":%s,\\"riskPercent\\":%.2f,\\"accountBalance\\":%.2f,\\"eaLotParams\\":%s,\\"openPositionsCount\\":%d,\\"openPositionsDetail\\":%s,\\"recentClosedTrades\\":%s,\\"mt5Symbol\\":\\"%s\\",\\"mt5Bid\\":%.*f,\\"mt5Ask\\":%.*f,\\"mt5SpreadPoints\\":%.1f,\\"mt5Candles\\":%s,\\"mt5M1Candles\\":%s}",
+      "{\\"symbol\\":\\"%s\\",\\"strategyFocus\\":\\"%s\\",\\"aiProvider\\":\\"%s\\",\\"aiThinkingHigh\\":%s,\\"timeframe\\":\\"%s\\",\\"fullAiControl\\":%s,\\"noSlAiExit\\":%s,\\"riskPercent\\":%.2f,\\"accountBalance\\":%.2f,\\"eaLotParams\\":%s,\\"openPositionsCount\\":%d,\\"openPositionsDetail\\":%s,\\"recentClosedTrades\\":%s,\\"mt5Symbol\\":\\"%s\\",\\"mt5Bid\\":%.*f,\\"mt5Ask\\":%.*f,\\"mt5SpreadPoints\\":%.1f,\\"mt5Candles\\":%s,\\"mt5M1Candles\\":%s}",
+      _Symbol,
       StrategyFocusToString(InpStrategyFocus),
       AiProviderToString(InpAiProvider),
       (InpAiThinkingHigh ? "true" : "false"),
@@ -1074,8 +1076,9 @@ void RunGeminiAnalysisAndTrade()
    double recoveryLots = (count > 13) ? StringToDouble(fields[13]) : 0.0;
    double recoveryTp   = (count > 14) ? StringToDouble(fields[14]) : 0.0;
 
-   PrintFormat("[AurumEA AI Judge (%s)] Vonis=%s | Conf=%d%% | PosDecision=%s | SLRef=%.2f | TP1=%.2f | HighProbTP=%.2f | RecLot=%.2f | RecTP=%.2f | %s",
-               AiProviderToString(InpAiProvider), signal, confidence, posDecision, sl, tp1, highProbTp, recoveryLots, recoveryTp, summary);
+   int pDigits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   PrintFormat("[AurumEA AI Judge (%s %s)] Vonis=%s | Conf=%d%% | PosDecision=%s | SLRef=%.*f | TP1=%.*f | HighProbTP=%.*f | RecLot=%.2f | RecTP=%.*f | %s",
+               _Symbol, AiProviderToString(InpAiProvider), signal, confidence, posDecision, pDigits, sl, pDigits, tp1, pDigits, highProbTp, recoveryLots, pDigits, recoveryTp, summary);
 
    bool closedInvalidByAi = false;
    if(InpNoSlAiExit && eaCount > 0)
@@ -1197,14 +1200,15 @@ void RunGeminiAnalysisAndTrade()
    {
       if(highProbTp > 0) execTp = NormalizeDouble(highProbTp, digits);
       double combinedAvg = (existingSameWeightedSum + execPrice * lots) / (existingSameLots + lots);
+      double layerStep = MathMax(minDist * 1.5, 30 * point);
       if(signal == "BUY")
       {
-         double minAnchor = NormalizeDouble(MathMax(ask + minDist, combinedAvg + 0.30), digits);
+         double minAnchor = NormalizeDouble(MathMax(ask + minDist, combinedAvg + layerStep), digits);
          if(execTp < minAnchor) execTp = minAnchor;
       }
       else
       {
-         double maxAnchor = NormalizeDouble(MathMin(bid - minDist, combinedAvg - 0.30), digits);
+         double maxAnchor = NormalizeDouble(MathMin(bid - minDist, combinedAvg - layerStep), digits);
          if(execTp > maxAnchor) execTp = maxAnchor;
       }
    }
@@ -1223,8 +1227,8 @@ void RunGeminiAnalysisAndTrade()
       g_lastTradeTime = TimeCurrent();
       if(isRecoveryOrder)
       {
-         PrintFormat("[AurumEA Mathematical Recovery 100%%] Eksekusi %s %.2f lot @ %.2f | TP Recovery=%.2f",
-                     signal, lots, execPrice, execTp);
+         PrintFormat("[AurumEA Mathematical Recovery 100%%] Eksekusi %s %s %.2f lot @ %.*f | TP Recovery=%.*f",
+                     _Symbol, signal, lots, digits, execPrice, digits, execTp);
       }
       if(sameSideCount > 0)
       {

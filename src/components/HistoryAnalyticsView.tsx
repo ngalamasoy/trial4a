@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import type { ClosedTrade } from '../types/trading.ts';
+import { getSymbolMeta, normalizeTradingSymbol, type ClosedTrade } from '../types/trading.ts';
 
 interface HistoryAnalyticsViewProps {
   closedTrades: ClosedTrade[];
@@ -85,10 +85,10 @@ export const HistoryAnalyticsView: React.FC<HistoryAnalyticsViewProps> = ({
     <div className="max-w-6xl mx-auto p-4 lg:p-6 space-y-6">
       <div className="border-b border-white/[0.08] pb-4">
         <h1 className="text-xl font-semibold text-[#F8FAFC]">
-          Performa &amp; Jurnal Trading XAU/USD M5
+          Performa &amp; Jurnal Trading Multi-Pair
         </h1>
         <p className="text-xs text-[#94A3B8] mt-1">
-          Evaluasi kurva ekuitas, win rate, profit factor, dan riwayat eksekusi Expert Advisor.
+          Evaluasi kurva ekuitas, win rate, profit factor, dan riwayat eksekusi Expert Advisor lintas pair (XAU/USD, GBP/USD, EUR/USD, BTC/USD).
         </p>
       </div>
 
@@ -192,6 +192,7 @@ export const HistoryAnalyticsView: React.FC<HistoryAnalyticsViewProps> = ({
               <thead>
                 <tr className="border-b border-white/[0.06] text-[#94A3B8] font-medium">
                   <th className="py-2.5 px-4">Tutup</th>
+                  <th className="py-2.5 px-3">Pair</th>
                   <th className="py-2.5 px-3">Arah</th>
                   <th className="py-2.5 px-3 text-right">Lot</th>
                   <th className="py-2.5 px-3 text-right">Entry</th>
@@ -202,38 +203,45 @@ export const HistoryAnalyticsView: React.FC<HistoryAnalyticsViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.05] font-mono tabular-nums">
-                {filteredTrades.map((t) => (
-                  <tr key={t.id} className="hover:bg-white/[0.02]">
-                    <td className="py-2.5 px-4 text-[#94A3B8]">
-                      {new Date(t.closedAt).toLocaleString('id-ID')}
-                    </td>
-                    <td
-                      className={`py-2.5 px-3 font-semibold ${
-                        t.side === 'BUY' ? 'text-[#10B981]' : 'text-[#EF4444]'
-                      }`}
-                    >
-                      {t.side}
-                    </td>
-                    <td className="py-2.5 px-3 text-right text-[#F8FAFC]">
-                      {t.lots.toFixed(2)}
-                    </td>
-                    <td className="py-2.5 px-3 text-right text-[#E6EDF3]">
-                      {t.entryPrice.toFixed(2)}
-                    </td>
-                    <td className="py-2.5 px-3 text-right text-[#E6EDF3]">
-                      {t.closePrice.toFixed(2)}
-                    </td>
-                    <td className="py-2.5 px-3 font-sans text-[#94A3B8]">{t.closeReason}</td>
-                    <td className="py-2.5 px-3 font-sans text-[#94A3B8]">{t.source}</td>
-                    <td
-                      className={`py-2.5 px-4 text-right font-semibold ${
-                        t.pnlUsd >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'
-                      }`}
-                    >
-                      {t.pnlUsd >= 0 ? '+' : '-'}${Math.abs(t.pnlUsd).toFixed(2)}
-                    </td>
-                  </tr>
-                ))}
+                {filteredTrades.map((t) => {
+                  const tSym = normalizeTradingSymbol(t.symbol);
+                  const dec = getSymbolMeta(tSym).decimals;
+                  return (
+                    <tr key={t.id} className="hover:bg-white/[0.02]">
+                      <td className="py-2.5 px-4 text-[#94A3B8]">
+                        {new Date(t.closedAt).toLocaleString('id-ID')}
+                      </td>
+                      <td className="py-2.5 px-3 text-[#D4AF37] font-semibold">
+                        {tSym}
+                      </td>
+                      <td
+                        className={`py-2.5 px-3 font-semibold ${
+                          t.side === 'BUY' ? 'text-[#10B981]' : 'text-[#EF4444]'
+                        }`}
+                      >
+                        {t.side}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-[#F8FAFC]">
+                        {t.lots.toFixed(2)}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-[#E6EDF3]">
+                        {t.entryPrice.toFixed(dec)}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-[#E6EDF3]">
+                        {t.closePrice.toFixed(dec)}
+                      </td>
+                      <td className="py-2.5 px-3 font-sans text-[#94A3B8]">{t.closeReason}</td>
+                      <td className="py-2.5 px-3 font-sans text-[#94A3B8]">{t.source}</td>
+                      <td
+                        className={`py-2.5 px-4 text-right font-semibold ${
+                          t.pnlUsd >= 0 ? 'text-[#10B981]' : 'text-[#EF4444]'
+                        }`}
+                      >
+                        {t.pnlUsd >= 0 ? '+' : '-'}${Math.abs(t.pnlUsd).toFixed(2)}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}

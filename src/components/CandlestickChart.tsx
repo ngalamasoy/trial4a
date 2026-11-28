@@ -13,12 +13,18 @@ import {
 } from 'lightweight-charts';
 import {
   BROKER_FEEDS,
+  CHART_TIMEFRAME_OPTIONS,
+  SYMBOL_OPTIONS,
   TIMEFRAME_META,
+  getSymbolMeta,
+  getTvSymbolForBrokerAndPair,
+  normalizeTradingSymbol,
   type BrokerFeedId,
   type ChartTimeframe,
   type EaAnalysisResult,
   type MarketSnapshot,
   type OpenPosition,
+  type TradingSymbol,
 } from '../types/trading.ts';
 
 export interface CandlestickChartHandle {
@@ -26,9 +32,12 @@ export interface CandlestickChartHandle {
 }
 
 interface CandlestickChartProps {
+  symbol: TradingSymbol;
+  onChangeSymbol?: (sym: TradingSymbol) => void;
   snapshot: MarketSnapshot | null;
   brokerFeed: BrokerFeedId;
   timeframe: ChartTimeframe;
+  onChangeTimeframe?: (tf: ChartTimeframe) => void;
   latestAnalysis: EaAnalysisResult | null;
   openPositions: OpenPosition[];
   noSlAiExit?: boolean;
@@ -40,9 +49,12 @@ interface CandlestickChartProps {
 export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProps>(
   (
     {
+      symbol,
+      onChangeSymbol,
       snapshot,
       brokerFeed,
       timeframe,
+      onChangeTimeframe,
       latestAnalysis,
       openPositions,
       noSlAiExit = true,
@@ -220,9 +232,22 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
       };
     }, []);
 
-    // Update series data when snapshot updates
+    // Update series priceFormat and data when symbol or snapshot updates
     useEffect(() => {
       if (!snapshot || !candleSeriesRef.current) return;
+
+      const symMeta = getSymbolMeta(snapshot.quote.symbol || symbol);
+      const priceFormat = {
+        type: 'price' as const,
+        precision: symMeta.decimals,
+        minMove: symMeta.minMove,
+      };
+      candleSeriesRef.current.applyOptions({ priceFormat });
+      ema9SeriesRef.current?.applyOptions({ priceFormat });
+      ema21SeriesRef.current?.applyOptions({ priceFormat });
+      ema50SeriesRef.current?.applyOptions({ priceFormat });
+      bbUpperRef.current?.applyOptions({ priceFormat });
+      bbLowerRef.current?.applyOptions({ priceFormat });
 
       const candleData = snapshot.candles.map((c) => ({
         time: c.time as UTCTimestamp,
@@ -261,7 +286,7 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
         bbLowerRef.current?.setData([]);
       }
 
-      const feedKey = `${snapshot.quote.source}|${snapshot.quote.timeframe}`;
+      const feedKey = `${normalizeTradingSymbol(snapshot.quote.symbol)}|${snapshot.quote.source}|${snapshot.quote.timeframe}`;
       if (lastBrokerRef.current !== feedKey) {
         lastBrokerRef.current = feedKey;
         hasFittedRef.current = false;
@@ -275,7 +300,7 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
         });
         hasFittedRef.current = true;
       }
-    }, [snapshot, showEmas, showBollinger]);
+    }, [snapshot, symbol, showEmas, showBollinger]);
 
     // Update S/R, AI & Active Position horizontal price lines
     useEffect(() => {
@@ -336,7 +361,11 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
         });
       }
 
-      if (showAiLevels && latestAnalysis && latestAnalysis.signal !== 'HOLD') {
+      const activeSym = normalizeTradingSymbol(snapshot?.quote.symbol || symbol);
+      const analysisMatchesSymbol =
+        latestAnalysis && normalizeTradingSymbol(latestAnalysis.symbol) === activeSym;
+
+      if (showAiLevels && analysisMatchesSymbol && latestAnalysis && latestAnalysis.signal !== 'HOLD') {
         priceLinesRef.current.push(
           series.createPriceLine({
             price: latestAnalysis.entryPrice,
@@ -373,8 +402,11 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
         }
       }
 
-      openPositions.forEach((pos, idx) => {
-        const labelIdx = openPositions.length > 1 ? ` #${idx + 1}` : '';
+      const matchingPositions = openPositions.filter(
+        (pos) => normalizeTradingSymbol(pos.symbol) === activeSym
+      );
+      matchingPositions.forEach((pos, idx) => {
+        const labelIdx = matchingPositions.length > 1 ? ` #${idx + 1}` : '';
         priceLinesRef.current.push(
           series.createPriceLine({
             price: pos.entryPrice,
@@ -410,12 +442,15 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
           );
         }
       });
-    }, [snapshot, latestAnalysis, openPositions, showSR, showAiLevels, noSlAiExit]);
+    }, [snapshot, symbol, latestAnalysis, openPositions, showSR, showAiLevels, noSlAiExit]);
 
+    const activeSym = normalizeTradingSymbol(snapshot?.quote.symbol || symbol);
+    const symMeta = getSymbolMeta(activeSym);
+    const decimals = symMeta.decimals;
     const latestBar = snapshot?.candles[snapshot.candles.length - 1];
     const displayBar = hoveredCandle || latestBar;
     const activeBrokerMeta = BROKER_FEEDS.find((b) => b.id === brokerFeed);
-    const tvSymbol = activeBrokerMeta?.tvSymbol || 'PEPPERSTONE:XAUUSD';
+    const tvSymbol = getTvSymbolForBrokerAndPair(brokerFeed, activeSym) || symMeta.tvDefaultSymbol;
     const tvInterval = TIMEFRAME_META[timeframe].tvResolution;
     const tvWidgetUrl = `https://s3.tradingview.com/widgetembed/?frameElementId=tv_chart&symbol=${encodeURIComponent(
       tvSymbol
@@ -426,22 +461,76 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
         {/* Chart Toolbar */}
         <div className="px-4 py-2.5 border-b border-white/[0.08] bg-[#111620] flex flex-wrap items-center justify-between gap-4">
           <div className="flex flex-wrap items-center gap-4 text-xs font-mono tabular-nums">
-            <span className="font-sans font-semibold text-[#F8FAFC]">
-              Chart XAU/USD {timeframe}{' '}
-              <span className="text-[#D4AF37] font-medium">
-                · {activeBrokerMeta?.name || 'Pepperstone'}
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <span className="font-sans font-semibold text-[#F8FAFC]">
+                Chart {activeSym} {timeframe}{' '}
+                <span className="text-[#D4AF37] font-medium">
+                  · {activeBrokerMeta?.name || 'Pepperstone'}
+                </span>
               </span>
-            </span>
+              {onChangeSymbol && (
+                <div
+                  role="group"
+                  aria-label="Pilih Pair Trading"
+                  className="inline-flex items-center rounded border border-white/[0.1] bg-[#0B0E14] p-0.5 gap-0.5"
+                >
+                  {SYMBOL_OPTIONS.map((opt) => {
+                    const active = opt.id === activeSym;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => onChangeSymbol(opt.id)}
+                        title={opt.description}
+                        className={`px-2 py-0.5 text-[11px] font-mono font-semibold rounded transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-[#D4AF37] text-[#0B0E14]'
+                            : 'text-[#94A3B8] hover:text-[#F8FAFC] hover:bg-white/[0.06]'
+                        }`}
+                      >
+                        {opt.label.replace('/USD', '')}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {onChangeTimeframe && (
+                <div
+                  role="group"
+                  aria-label="Pilih Timeframe Chart"
+                  className="inline-flex items-center rounded border border-white/[0.1] bg-[#0B0E14] p-0.5 gap-0.5"
+                >
+                  {CHART_TIMEFRAME_OPTIONS.map((tf) => {
+                    const active = tf.id === timeframe;
+                    return (
+                      <button
+                        key={tf.id}
+                        type="button"
+                        onClick={() => onChangeTimeframe(tf.id)}
+                        title={tf.fullLabel}
+                        className={`px-2 py-0.5 text-[11px] font-mono font-semibold rounded transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-[#D4AF37] text-[#0B0E14]'
+                            : 'text-[#94A3B8] hover:text-[#F8FAFC] hover:bg-white/[0.06]'
+                        }`}
+                      >
+                        {tf.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
             {displayBar && (
               <div className="flex items-center gap-3 text-[#94A3B8]">
                 <span>
-                  O <strong className="text-[#E6EDF3] font-medium">{displayBar.open.toFixed(2)}</strong>
+                  O <strong className="text-[#E6EDF3] font-medium">{displayBar.open.toFixed(decimals)}</strong>
                 </span>
                 <span>
-                  H <strong className="text-[#E6EDF3] font-medium">{displayBar.high.toFixed(2)}</strong>
+                  H <strong className="text-[#E6EDF3] font-medium">{displayBar.high.toFixed(decimals)}</strong>
                 </span>
                 <span>
-                  L <strong className="text-[#E6EDF3] font-medium">{displayBar.low.toFixed(2)}</strong>
+                  L <strong className="text-[#E6EDF3] font-medium">{displayBar.low.toFixed(decimals)}</strong>
                 </span>
                 <span>
                   C{' '}
@@ -450,7 +539,7 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
                       displayBar.close >= displayBar.open ? 'text-[#10B981]' : 'text-[#EF4444]'
                     }`}
                   >
-                    {displayBar.close.toFixed(2)}
+                    {displayBar.close.toFixed(decimals)}
                   </strong>
                 </span>
               </div>
@@ -458,13 +547,13 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
             {showEmas && snapshot && (
               <div className="hidden md:flex items-center gap-3 text-[11px]">
                 <span className="text-[#D4AF37]">
-                  EMA9 {snapshot.indicators.ema9?.toFixed(2) ?? '--'}
+                  EMA9 {snapshot.indicators.ema9?.toFixed(decimals) ?? '--'}
                 </span>
                 <span className="text-[#38BDF8]">
-                  EMA21 {snapshot.indicators.ema21?.toFixed(2) ?? '--'}
+                  EMA21 {snapshot.indicators.ema21?.toFixed(decimals) ?? '--'}
                 </span>
                 <span className="text-[#A78BFA]">
-                  EMA50 {snapshot.indicators.ema50?.toFixed(2) ?? '--'}
+                  EMA50 {snapshot.indicators.ema50?.toFixed(decimals) ?? '--'}
                 </span>
               </div>
             )}
@@ -567,7 +656,7 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
               <div className="text-center space-y-2">
                 <div className="w-6 h-6 border-2 border-[#D4AF37] border-t-transparent rounded-full animate-spin mx-auto" />
                 <p className="text-xs text-[#94A3B8]">
-                  Memuat candlestick {timeframe} XAU/USD real-time...
+                  Memuat candlestick {timeframe} {activeSym} real-time...
                 </p>
               </div>
             </div>
@@ -602,17 +691,17 @@ export const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickCh
               </span>
               {snapshot.indicators.structure.nearestSupport && (
                 <span className="text-[#2DD4BF]">
-                  S1 {snapshot.indicators.structure.nearestSupport.price.toFixed(2)}{' '}
+                  S1 {snapshot.indicators.structure.nearestSupport.price.toFixed(decimals)}{' '}
                   <span className="text-[#64748B]">
-                    (-{snapshot.indicators.structure.nearestSupport.distanceUsd.toFixed(2)})
+                    (-{snapshot.indicators.structure.nearestSupport.distanceUsd.toFixed(decimals)})
                   </span>
                 </span>
               )}
               {snapshot.indicators.structure.nearestResistance && (
                 <span className="text-[#FB7185]">
-                  R1 {snapshot.indicators.structure.nearestResistance.price.toFixed(2)}{' '}
+                  R1 {snapshot.indicators.structure.nearestResistance.price.toFixed(decimals)}{' '}
                   <span className="text-[#64748B]">
-                    (+{snapshot.indicators.structure.nearestResistance.distanceUsd.toFixed(2)})
+                    (+{snapshot.indicators.structure.nearestResistance.distanceUsd.toFixed(decimals)})
                   </span>
                 </span>
               )}

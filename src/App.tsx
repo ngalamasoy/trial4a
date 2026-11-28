@@ -15,20 +15,25 @@ import { OfflineIndicator } from './components/OfflineIndicator.tsx';
 import { RiskToastStack } from './components/RiskToastStack.tsx';
 import {
   TIMEFRAME_META,
+  getSymbolMeta,
   getTimeframeForCadence,
+  normalizeTradingSymbol,
   type AiProviderMode,
   type BrokerFeedId,
+  type ChartTimeframe,
   type ClosedTrade,
   type EaAnalysisResult,
   type EaConfig,
   type MacroContext,
+  type MarketQuote,
   type MarketSnapshot,
   type Mt5BridgeStatus,
   type OpenPosition,
   type RecentClosedTradeContext,
   type RiskNotification,
+  type TradingSymbol,
 } from './types/trading.ts';
-import { calculateXauLotSize, calculateXauPnl } from './utils/indicators.ts';
+import { calculatePairLotSize, calculatePairPnl } from './utils/indicators.ts';
 
 const STORAGE_KEYS = {
   CONFIG: 'aurumea_v1_config',
@@ -39,6 +44,8 @@ const STORAGE_KEYS = {
 };
 
 const DEFAULT_CONFIG: EaConfig = {
+  tradingSymbol: 'XAU/USD',
+  chartTimeframe: 'M5',
   autoAnalyze: false,
   analyzeCadence: '30S',
   autoExecute: false,
@@ -89,6 +96,9 @@ function readStoredJson<T>(key: string, fallback: T): T {
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('terminal');
   const [snapshot, setSnapshot] = useState<MarketSnapshot | null>(null);
+  const [quotesBySymbol, setQuotesBySymbol] = useState<
+    Partial<Record<TradingSymbol, MarketQuote>>
+  >({});
   const [loadingFeed, setLoadingFeed] = useState(true);
   const [feedError, setFeedError] = useState<string | null>(null);
   const [streamConnected, setStreamConnected] = useState(false);
@@ -135,6 +145,7 @@ export default function App() {
     return {
       ...DEFAULT_CONFIG,
       ...stored,
+      tradingSymbol: normalizeTradingSymbol(stored.tradingSymbol),
       aiProvider: normalizedProvider,
     };
   });
@@ -174,6 +185,7 @@ export default function App() {
   const mt5StatusRef = useRef(mt5Status);
   const configRef = useRef(config);
   const snapshotRef = useRef(snapshot);
+  const quotesBySymbolRef = useRef(quotesBySymbol);
 
   // Active balance & positions come from real MT5 account when connected, otherwise local sim
   const isMt5Live = Boolean(mt5Status.connected && mt5Status.liveAccount);
@@ -184,6 +196,7 @@ export default function App() {
       return mt5Status.liveAccount.positions.map((p) => ({
         id: `mt5_${p.ticket}`,
         mt5Ticket: p.ticket,
+        symbol: normalizeTradingSymbol(p.symbol),
         side: p.side,
         lots: p.lots,
         entryPrice: p.openPrice,
@@ -208,6 +221,7 @@ export default function App() {
   mt5StatusRef.current = mt5Status;
   configRef.current = config;
   snapshotRef.current = snapshot;
+  quotesBySymbolRef.current = quotesBySymbol;
 
   const pushRiskNotification = useCallback(
     (item: Omit<RiskNotification, 'id' | 'timestamp'>) => {
@@ -274,42 +288,51 @@ export default function App() {
     const now = Date.now();
 
     const inferred: ClosedTrade[] = disappeared.map((pos) => {
-      const mark = snap
+      const posSym = normalizeTradingSymbol(pos.symbol);
+      const symMeta = getSymbolMeta(posSym);
+      const dec = symMeta.decimals;
+      const matchingQuote =
+        snap && normalizeTradingSymbol(snap.quote.symbol) === posSym
+          ? snap.quote
+          : quotesBySymbolRef.current[posSym] ?? null;
+      const mark = matchingQuote
         ? pos.side === 'BUY'
-          ? snap.quote.bid
-          : snap.quote.ask
+          ? matchingQuote.bid
+          : matchingQuote.ask
         : pos.entryPrice;
+      const nearMargin = Math.max(symMeta.minSlDistance * 0.6, symMeta.defaultAtr * 0.25);
       const nearTp =
         pos.takeProfit > 0 &&
         (pos.side === 'BUY'
-          ? mark >= pos.takeProfit - 0.6
-          : mark <= pos.takeProfit + 0.6);
+          ? mark >= pos.takeProfit - nearMargin
+          : mark <= pos.takeProfit + nearMargin);
       const nearSl =
         pos.stopLoss > 0 &&
         (pos.side === 'BUY'
-          ? mark <= pos.stopLoss + 0.6
-          : mark >= pos.stopLoss - 0.6);
+          ? mark <= pos.stopLoss + nearMargin
+          : mark >= pos.stopLoss - nearMargin);
       const closePrice = nearTp ? pos.takeProfit : nearSl ? pos.stopLoss : mark;
       const closeReason: ClosedTrade['closeReason'] = nearTp
         ? 'TP Hit'
         : nearSl
         ? 'SL Hit'
         : 'MT5 Sync';
-      const pnlUsd = calculateXauPnl(pos.side, pos.lots, pos.entryPrice, closePrice);
+      const pnlUsd = calculatePairPnl(pos.side, pos.lots, pos.entryPrice, closePrice, posSym);
       const points =
         pos.side === 'BUY' ? closePrice - pos.entryPrice : pos.entryPrice - closePrice;
       return {
         id: `${pos.id}_closed_${now}`,
+        symbol: posSym,
         side: pos.side,
         lots: pos.lots,
         entryPrice: pos.entryPrice,
-        closePrice: Number(closePrice.toFixed(2)),
+        closePrice: Number(closePrice.toFixed(dec)),
         stopLoss: pos.stopLoss,
         takeProfit: pos.takeProfit,
         openedAt: pos.openedAt,
         closedAt: now,
         pnlUsd,
-        points: Number(points.toFixed(2)),
+        points: Number(points.toFixed(dec)),
         closeReason,
         source: 'MT5_LIVE',
         setupPattern: pos.setupPattern,
@@ -372,25 +395,74 @@ export default function App() {
     };
   }, []);
 
+  const activeSymbol: TradingSymbol = normalizeTradingSymbol(config.tradingSymbol);
+  const activeSymbolRef = useRef<TradingSymbol>(activeSymbol);
+  activeSymbolRef.current = activeSymbol;
+
   const activeBrokerFeed: BrokerFeedId = config.brokerFeed ?? 'PEPPERSTONE';
-  const activeTimeframe = getTimeframeForCadence(config.analyzeCadence);
+  const activeTimeframe: ChartTimeframe =
+    config.chartTimeframe && config.chartTimeframe in TIMEFRAME_META
+      ? config.chartTimeframe
+      : getTimeframeForCadence(config.analyzeCadence);
   const activeTimeframeRef = useRef(activeTimeframe);
   activeTimeframeRef.current = activeTimeframe;
 
-  // Fetch initial candles snapshot + open real-time SSE market stream for the selected broker & timeframe
+  const handleChangeSymbol = useCallback((nextSym: TradingSymbol) => {
+    const normalized = normalizeTradingSymbol(nextSym);
+    if (normalized !== activeSymbolRef.current) {
+      setSnapshot(null);
+      lastAnalyzedCandleRef.current = null;
+      setAnalysisError(null);
+    }
+    setConfig((prev) => ({ ...prev, tradingSymbol: normalized }));
+  }, []);
+
+  const handleChangeTimeframe = useCallback(
+    (nextTf: ChartTimeframe) => {
+      if (nextTf !== activeTimeframeRef.current) {
+        setSnapshot(null);
+      }
+      setConfig((prev) => {
+        const next: EaConfig = { ...prev, chartTimeframe: nextTf };
+        if (nextTf === 'M15') {
+          next.analyzeCadence = '900S';
+        } else if (nextTf === 'M30') {
+          next.analyzeCadence = '1800S';
+        } else if (nextTf === 'H1') {
+          next.analyzeCadence = '3600S';
+        } else if (
+          prev.analyzeCadence === '900S' ||
+          prev.analyzeCadence === '1800S' ||
+          prev.analyzeCadence === '3600S'
+        ) {
+          next.analyzeCadence = 'CANDLE_CLOSE';
+        }
+        return next;
+      });
+    },
+    []
+  );
+
+  // Fetch initial candles snapshot + open real-time SSE market stream for the selected pair, broker & timeframe
   const connectStream = useCallback(() => {
     setLoadingFeed(true);
     setFeedError(null);
     setStreamConnected(false);
 
+    const symbolParam = encodeURIComponent(activeSymbol);
     const brokerParam = encodeURIComponent(activeBrokerFeed);
     const tfParam = encodeURIComponent(activeTimeframe);
 
-    fetch(`/api/market/candles?broker=${brokerParam}&timeframe=${tfParam}`)
+    fetch(`/api/market/candles?broker=${brokerParam}&timeframe=${tfParam}&symbol=${symbolParam}`)
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Gagal memuat data pasar.');
-        setSnapshot(data as MarketSnapshot);
+        const snap = data as MarketSnapshot;
+        setSnapshot(snap);
+        setQuotesBySymbol((prev) => ({
+          ...prev,
+          [normalizeTradingSymbol(snap.quote.symbol)]: snap.quote,
+        }));
         setLoadingFeed(false);
       })
       .catch((err: unknown) => {
@@ -398,11 +470,17 @@ export default function App() {
         setLoadingFeed(false);
       });
 
-    const es = new EventSource(`/api/market/stream?broker=${brokerParam}&timeframe=${tfParam}`);
+    const es = new EventSource(
+      `/api/market/stream?broker=${brokerParam}&timeframe=${tfParam}&symbol=${symbolParam}`
+    );
     es.addEventListener('tick', (ev) => {
       try {
         const parsed = JSON.parse((ev as MessageEvent).data) as MarketSnapshot;
         setSnapshot(parsed);
+        setQuotesBySymbol((prev) => ({
+          ...prev,
+          [normalizeTradingSymbol(parsed.quote.symbol)]: parsed.quote,
+        }));
         setStreamConnected(true);
         setLoadingFeed(false);
         setFeedError(null);
@@ -426,7 +504,7 @@ export default function App() {
     return () => {
       es.close();
     };
-  }, [activeBrokerFeed, activeTimeframe]);
+  }, [activeSymbol, activeBrokerFeed, activeTimeframe]);
 
   useEffect(() => {
     const cleanup = connectStream();
@@ -458,8 +536,8 @@ export default function App() {
   // Live Simulation Position Monitor (only runs for web sim positions; MT5 Live handles SL/TP on broker)
   useEffect(() => {
     if (isMt5Live || !snapshot || simPositions.length === 0) return;
+    const snapSym = normalizeTradingSymbol(snapshot.quote.symbol);
     const { bid, ask } = snapshot.quote;
-    const atr = snapshot.indicators.atr14 ?? 2.5;
     const cfg = configRef.current;
 
     const remaining: OpenPosition[] = [];
@@ -467,6 +545,14 @@ export default function App() {
     let realizedDelta = 0;
 
     for (const pos of simPositions) {
+      const posSym = normalizeTradingSymbol(pos.symbol);
+      if (posSym !== snapSym) {
+        remaining.push(pos);
+        continue;
+      }
+      const symMeta = getSymbolMeta(posSym);
+      const dec = symMeta.decimals;
+      const atr = snapshot.indicators.atr14 ?? symMeta.defaultAtr;
       const exitPrice = pos.side === 'BUY' ? bid : ask;
       const isNoSlPos = pos.stopLoss <= 0 || (cfg.noSlAiExit ?? true);
       let hitReason: ClosedTrade['closeReason'] | null = null;
@@ -491,22 +577,23 @@ export default function App() {
       }
 
       if (hitReason) {
-        const pnlUsd = calculateXauPnl(pos.side, pos.lots, pos.entryPrice, closePrice);
+        const pnlUsd = calculatePairPnl(pos.side, pos.lots, pos.entryPrice, closePrice, posSym);
         const points =
           pos.side === 'BUY' ? closePrice - pos.entryPrice : pos.entryPrice - closePrice;
         realizedDelta += pnlUsd;
         newlyClosed.push({
           id: pos.id,
+          symbol: posSym,
           side: pos.side,
           lots: pos.lots,
           entryPrice: pos.entryPrice,
-          closePrice: Number(closePrice.toFixed(2)),
+          closePrice: Number(closePrice.toFixed(dec)),
           stopLoss: pos.stopLoss,
           takeProfit: pos.takeProfit,
           openedAt: pos.openedAt,
           closedAt: Date.now(),
           pnlUsd,
-          points: Number(points.toFixed(2)),
+          points: Number(points.toFixed(dec)),
           closeReason: hitReason,
           source: pos.source,
           setupPattern: pos.setupPattern,
@@ -517,13 +604,18 @@ export default function App() {
       } else {
         let updatedPos = pos;
         const useBe = cfg.useBreakeven ?? true;
-        const beTrig = cfg.breakevenTriggerUsd ?? 1.2;
+        const beTrigRaw = cfg.breakevenTriggerUsd ?? 1.2;
+        const beTrigDist =
+          posSym === 'XAU/USD'
+            ? beTrigRaw
+            : Math.max(symMeta.minSlDistance * 1.1, atr * 0.5);
+        const beStep = Math.max(symMeta.minMove * 5, symMeta.minSlDistance * 0.2);
 
         if (useBe) {
           if (pos.side === 'BUY') {
             const best = Math.max(pos.highestFavorablePrice, exitPrice);
-            const beSl = Number((pos.entryPrice + 0.2).toFixed(2));
-            if (best - pos.entryPrice >= beTrig && beSl > updatedPos.stopLoss && beSl < exitPrice) {
+            const beSl = Number((pos.entryPrice + beStep).toFixed(dec));
+            if (best - pos.entryPrice >= beTrigDist && beSl > updatedPos.stopLoss && beSl < exitPrice) {
               updatedPos = {
                 ...updatedPos,
                 highestFavorablePrice: best,
@@ -533,8 +625,8 @@ export default function App() {
             }
           } else {
             const best = Math.min(pos.highestFavorablePrice, exitPrice);
-            const beSl = Number((pos.entryPrice - 0.2).toFixed(2));
-            if (pos.entryPrice - best >= beTrig && beSl < updatedPos.stopLoss && beSl > exitPrice) {
+            const beSl = Number((pos.entryPrice - beStep).toFixed(dec));
+            if (pos.entryPrice - best >= beTrigDist && beSl < updatedPos.stopLoss && beSl > exitPrice) {
               updatedPos = {
                 ...updatedPos,
                 highestFavorablePrice: best,
@@ -549,7 +641,7 @@ export default function App() {
           const trailDist = atr * cfg.trailingAtrMultiplier;
           if (pos.side === 'BUY') {
             const best = Math.max(updatedPos.highestFavorablePrice, exitPrice);
-            const candidateSl = Number((best - trailDist).toFixed(2));
+            const candidateSl = Number((best - trailDist).toFixed(dec));
             if (best - pos.entryPrice >= trailDist && candidateSl > updatedPos.stopLoss) {
               updatedPos = {
                 ...updatedPos,
@@ -562,7 +654,7 @@ export default function App() {
             }
           } else {
             const best = Math.min(updatedPos.highestFavorablePrice, exitPrice);
-            const candidateSl = Number((best + trailDist).toFixed(2));
+            const candidateSl = Number((best + trailDist).toFixed(dec));
             if (pos.entryPrice - best >= trailDist && candidateSl < updatedPos.stopLoss) {
               updatedPos = {
                 ...updatedPos,
@@ -591,8 +683,9 @@ export default function App() {
   // Compute current active risk exposure across open positions
   const exposureMetrics = useMemo(() => {
     const usd = activePositions.reduce((acc, pos) => {
+      const symMeta = getSymbolMeta(pos.symbol);
       const dist = pos.stopLoss > 0 ? Math.abs(pos.entryPrice - pos.stopLoss) : 0;
-      return acc + dist * pos.lots * 100;
+      return acc + dist * pos.lots * symMeta.contractSize;
     }, 0);
     const pct = activeBalance > 0 ? (usd / activeBalance) * 100 : 0;
     return {
@@ -616,18 +709,24 @@ export default function App() {
       const snap = snapshotRef.current;
       if (!snap) return;
 
+      const orderSym = normalizeTradingSymbol(snap.quote.symbol || activeSymbolRef.current);
+      const symMeta = getSymbolMeta(orderSym);
+      const dec = symMeta.decimals;
+
       const cfg = configRef.current;
       const isNoSlMode = cfg.noSlAiExit ?? true;
       const curBalance = activeBalanceRef.current;
       const entry = params.side === 'BUY' ? snap.quote.ask : snap.quote.bid;
-      const atr = snap.indicators.atr14 ?? 2.5;
+      const atr = snap.indicators.atr14 ?? symMeta.defaultAtr;
       const refSl =
         params.stopLoss > 0
-          ? Number(params.stopLoss.toFixed(2))
-          : Number((params.side === 'BUY' ? entry - atr * 1.2 : entry + atr * 1.2).toFixed(2));
+          ? Number(params.stopLoss.toFixed(dec))
+          : Number((params.side === 'BUY' ? entry - atr * 1.2 : entry + atr * 1.2).toFixed(dec));
       const actualSl = isNoSlMode ? 0 : refSl;
 
-      const sameSidePositions = activePositionsRef.current.filter((p) => p.side === params.side);
+      const sameSidePositions = activePositionsRef.current.filter(
+        (p) => normalizeTradingSymbol(p.symbol) === orderSym && p.side === params.side
+      );
       const isLayering = sameSidePositions.length > 0;
       const isMartil =
         Boolean(params.isRecoveryOrder) || (isLayering && (cfg.martingaleEnabled ?? true));
@@ -635,7 +734,7 @@ export default function App() {
       const baseLot =
         cfg.lotMode === 'FIXED_LOT'
           ? cfg.fixedLot
-          : calculateXauLotSize(curBalance, cfg.riskPercent, entry, refSl);
+          : calculatePairLotSize(curBalance, cfg.riskPercent, entry, refSl, orderSym);
 
       let lots =
         params.overrideLots && params.overrideLots > 0
@@ -650,13 +749,18 @@ export default function App() {
         lots = Math.min(20, Math.max(0.01, Number((latestSameSide.lots * mult).toFixed(2))));
       }
 
+      const minTpFloor = Math.max(symMeta.minMove * 5, symMeta.minSlDistance * 0.5);
+      const minTpFallback = Math.max(symMeta.minSlDistance * 1.2, atr * 0.65);
+
       let finalTp = Number(
-        (params.overrideTp && params.overrideTp > 0 ? params.overrideTp : params.takeProfit).toFixed(2)
+        (params.overrideTp && params.overrideTp > 0 ? params.overrideTp : params.takeProfit).toFixed(
+          dec
+        )
       );
-      if (params.side === 'BUY' && finalTp <= entry + 0.2) {
-        finalTp = Number((entry + Math.max(0.5, atr * 0.65)).toFixed(2));
-      } else if (params.side === 'SELL' && finalTp >= entry - 0.2) {
-        finalTp = Number((entry - Math.max(0.5, atr * 0.65)).toFixed(2));
+      if (params.side === 'BUY' && finalTp <= entry + minTpFloor) {
+        finalTp = Number((entry + minTpFallback).toFixed(dec));
+      } else if (params.side === 'SELL' && finalTp >= entry - minTpFloor) {
+        finalTp = Number((entry - minTpFallback).toFixed(dec));
       }
 
       if (isLayering) {
@@ -666,34 +770,46 @@ export default function App() {
           0
         );
         const weightedAvg = (existingWeightedSum + entry * lots) / (existingLots + lots);
+        const minAnchorDist = Math.max(symMeta.minSlDistance * 0.6, atr * 0.25);
+        const maxReachDist = Math.max(symMeta.minSlDistance * 1.4, atr * 0.72);
 
         if (params.side === 'BUY') {
-          const minProfitAnchor = Number(Math.max(entry + 0.3, weightedAvg + 0.3).toFixed(2));
-          const maxHighProbReach = Number((entry + Math.max(0.75, atr * 0.72)).toFixed(2));
+          const minProfitAnchor = Number(
+            Math.max(entry + minAnchorDist, weightedAvg + minAnchorDist).toFixed(dec)
+          );
+          const maxHighProbReach = Number((entry + maxReachDist).toFixed(dec));
           const cappedMax = Math.max(minProfitAnchor, maxHighProbReach);
           const seedTp =
-            params.overrideTp && params.overrideTp > entry + 0.2
+            params.overrideTp && params.overrideTp > entry + minTpFloor
               ? params.overrideTp
               : Math.min(cappedMax, Math.max(minProfitAnchor, entry + atr * 0.5));
-          finalTp = Number(Math.max(minProfitAnchor, Math.min(seedTp, cappedMax)).toFixed(2));
+          finalTp = Number(Math.max(minProfitAnchor, Math.min(seedTp, cappedMax)).toFixed(dec));
         } else {
-          const maxProfitAnchor = Number(Math.min(entry - 0.3, weightedAvg - 0.3).toFixed(2));
-          const minHighProbReach = Number((entry - Math.max(0.75, atr * 0.72)).toFixed(2));
+          const maxProfitAnchor = Number(
+            Math.min(entry - minAnchorDist, weightedAvg - minAnchorDist).toFixed(dec)
+          );
+          const minHighProbReach = Number((entry - maxReachDist).toFixed(dec));
           const cappedMin = Math.min(maxProfitAnchor, minHighProbReach);
           const seedTp =
-            params.overrideTp && params.overrideTp < entry - 0.2
+            params.overrideTp && params.overrideTp < entry - minTpFloor
               ? params.overrideTp
               : Math.max(cappedMin, Math.min(maxProfitAnchor, entry - atr * 0.5));
-          finalTp = Number(Math.min(maxProfitAnchor, Math.max(seedTp, cappedMin)).toFixed(2));
+          finalTp = Number(Math.min(maxProfitAnchor, Math.max(seedTp, cappedMin)).toFixed(dec));
         }
       }
 
       const tradeRiskUsd =
-        actualSl > 0 ? Number((Math.abs(entry - actualSl) * lots * 100).toFixed(2)) : 0;
+        actualSl > 0
+          ? Number((Math.abs(entry - actualSl) * lots * symMeta.contractSize).toFixed(2))
+          : 0;
       const tradeRiskPct =
         curBalance > 0 ? Number(((tradeRiskUsd / curBalance) * 100).toFixed(2)) : 0;
       const currentExposureUsd = activePositionsRef.current.reduce(
-        (acc, p) => acc + (p.stopLoss > 0 ? Math.abs(p.entryPrice - p.stopLoss) * p.lots * 100 : 0),
+        (acc, p) =>
+          acc +
+          (p.stopLoss > 0
+            ? Math.abs(p.entryPrice - p.stopLoss) * p.lots * getSymbolMeta(p.symbol).contractSize
+            : 0),
         0
       );
       const nextTotalExposurePct =
@@ -715,11 +831,12 @@ export default function App() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
+              symbol: orderSym,
               action: params.side,
               lots,
               sl: actualSl,
               tp: finalTp,
-              refEntry: Number(entry.toFixed(2)),
+              refEntry: Number(entry.toFixed(dec)),
               comment: isMartil
                 ? `Martil ${params.setupPattern || 'AurumEA'}`.slice(0, 28)
                 : params.setupPattern || 'AurumEA M5',
@@ -735,11 +852,12 @@ export default function App() {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
+                symbol: orderSym,
                 action: 'MODIFY_TP',
                 side: params.side,
                 tp: finalTp,
                 ticket: 0,
-                refEntry: Number(entry.toFixed(2)),
+                refEntry: Number(entry.toFixed(dec)),
               }),
             });
             if (!modRes.ok) {
@@ -753,11 +871,11 @@ export default function App() {
           pushRiskNotification({
             level,
             title: isLayering
-              ? `${isMartil ? 'Martil' : 'Layer'} MT5 (${params.side} ${lots.toFixed(2)} Lot · TP Keduanya ${finalTp.toFixed(2)})`
-              : `Order Real MT5 Dikirim (${params.side} ${lots.toFixed(2)} Lot)`,
+              ? `${isMartil ? 'Martil' : 'Layer'} MT5 ${orderSym} (${params.side} ${lots.toFixed(2)} Lot · TP ${finalTp.toFixed(dec)})`
+              : `Order Real MT5 ${orderSym} (${params.side} ${lots.toFixed(2)} Lot)`,
             message: isLayering
-              ? `${params.side} baru @ ${entry.toFixed(2)} + sinkron TP gabungan ${finalTp.toFixed(2)} (Prob ≥85%) ke semua posisi ${params.side} MT5 #${liveMt5.profile?.login}.`
-              : `Perintah ${params.side} XAU/USD @ ${entry.toFixed(2)} (${actualSl === 0 ? 'Tanpa SL · AI Exit' : `SL ${actualSl.toFixed(2)}`}, TP ${finalTp.toFixed(2)}) dikirim ke MT5 #${liveMt5.profile?.login}.`,
+              ? `${params.side} ${orderSym} baru @ ${entry.toFixed(dec)} + sinkron TP gabungan ${finalTp.toFixed(dec)} (Prob ≥85%) ke semua posisi ${params.side} MT5 #${liveMt5.profile?.login}.`
+              : `Perintah ${params.side} ${orderSym} @ ${entry.toFixed(dec)} (${actualSl === 0 ? 'Tanpa SL · AI Exit' : `SL ${actualSl.toFixed(dec)}`}, TP ${finalTp.toFixed(dec)}) dikirim ke MT5 #${liveMt5.profile?.login}.`,
             tradeRiskPercent: tradeRiskPct,
             tradeRiskUsd,
             totalExposurePercent: nextTotalExposurePct,
@@ -778,9 +896,10 @@ export default function App() {
       // Simulation mode execution
       const newPos: OpenPosition = {
         id: `pos_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        symbol: orderSym,
         side: params.side,
         lots,
-        entryPrice: Number(entry.toFixed(2)),
+        entryPrice: Number(entry.toFixed(dec)),
         stopLoss: actualSl,
         takeProfit: finalTp,
         openedAt: Date.now(),
@@ -789,23 +908,27 @@ export default function App() {
         setupPattern: isMartil
           ? `Martil: ${params.setupPattern || 'AI Layer'}`
           : params.setupPattern,
-        highestFavorablePrice: Number(entry.toFixed(2)),
+        highestFavorablePrice: Number(entry.toFixed(dec)),
         trailingActivated: false,
       };
 
       setSimPositions((prev) => [
         newPos,
-        ...prev.map((p) => (isLayering && p.side === params.side ? { ...p, takeProfit: finalTp } : p)),
+        ...prev.map((p) =>
+          isLayering && normalizeTradingSymbol(p.symbol) === orderSym && p.side === params.side
+            ? { ...p, takeProfit: finalTp }
+            : p
+        ),
       ]);
 
       pushRiskNotification({
         level,
         title: isLayering
-          ? `${isMartil ? 'Martil' : 'Layer'} Simulasi (${params.side} ${lots.toFixed(2)} Lot)`
-          : `Order Simulasi (${params.side} ${lots.toFixed(2)} Lot)`,
+          ? `${isMartil ? 'Martil' : 'Layer'} Simulasi ${orderSym} (${params.side} ${lots.toFixed(2)} Lot)`
+          : `Order Simulasi ${orderSym} (${params.side} ${lots.toFixed(2)} Lot)`,
         message: isLayering
-          ? `Posisi ${params.side} ke-${sameSidePositions.length + 1} @ ${entry.toFixed(2)}. TP semua posisi ${params.side} disamakan → ${finalTp.toFixed(2)} (Prob ≥85%).`
-          : `Posisi ${params.side} XAU/USD @ ${entry.toFixed(2)} (${actualSl === 0 ? 'Tanpa SL · AI Exit aktif' : `SL ${actualSl.toFixed(2)}`} · TP ${finalTp.toFixed(2)}).`,
+          ? `Posisi ${params.side} ${orderSym} ke-${sameSidePositions.length + 1} @ ${entry.toFixed(dec)}. TP semua posisi ${params.side} disamakan → ${finalTp.toFixed(dec)} (Prob ≥85%).`
+          : `Posisi ${params.side} ${orderSym} @ ${entry.toFixed(dec)} (${actualSl === 0 ? 'Tanpa SL · AI Exit aktif' : `SL ${actualSl.toFixed(dec)}`} · TP ${finalTp.toFixed(dec)}).`,
         tradeRiskPercent: tradeRiskPct,
         tradeRiskUsd,
         totalExposurePercent: nextTotalExposurePct,
@@ -816,25 +939,31 @@ export default function App() {
 
   // Close matching open positions automatically when AI Judge decides trend reversed / likely lose
   const closePositionsByAiDecision = useCallback(
-    async (decision: 'CLOSE_BUY' | 'CLOSE_SELL' | 'CLOSE_ALL', reason: string) => {
+    async (
+      decision: 'CLOSE_BUY' | 'CLOSE_SELL' | 'CLOSE_ALL',
+      reason: string,
+      targetSymbol?: TradingSymbol
+    ) => {
       const snap = snapshotRef.current;
       const positions = activePositionsRef.current;
-      const matches = positions.filter((p) =>
-        decision === 'CLOSE_ALL'
+      const scopedSym = targetSymbol ? normalizeTradingSymbol(targetSymbol) : activeSymbolRef.current;
+      const matches = positions.filter((p) => {
+        if (normalizeTradingSymbol(p.symbol) !== scopedSym) return false;
+        return decision === 'CLOSE_ALL'
           ? true
           : decision === 'CLOSE_BUY'
           ? p.side === 'BUY'
-          : p.side === 'SELL'
-      );
+          : p.side === 'SELL';
+      });
       if (matches.length === 0) return false;
 
       if (mt5StatusRef.current.connected) {
         try {
-          if (decision === 'CLOSE_ALL') {
+          if (decision === 'CLOSE_ALL' && matches.length === positions.length) {
             await fetch('/api/mt5/order', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ action: 'CLOSE_ALL' }),
+              body: JSON.stringify({ action: 'CLOSE_ALL', symbol: scopedSym }),
             });
           } else {
             for (const p of matches) {
@@ -843,6 +972,7 @@ export default function App() {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
+                    symbol: scopedSym,
                     action: 'CLOSE',
                     ticket: p.mt5Ticket,
                     side: p.side,
@@ -854,7 +984,7 @@ export default function App() {
           }
           pushRiskNotification({
             level: 'WARNING',
-            title: `AI Exit MT5 (${decision})`,
+            title: `AI Exit MT5 ${scopedSym} (${decision})`,
             message: `${matches.length} posisi ditutup oleh AI Judge: ${reason}`,
             tradeRiskPercent: 0,
             tradeRiskUsd: 0,
@@ -872,32 +1002,37 @@ export default function App() {
       let totalPnl = 0;
       const closedListNow: ClosedTrade[] = [];
 
-      if (snap) {
-        for (const pos of activePositionsRef.current) {
-          if (!targetIds.has(pos.id)) continue;
-          const closePrice = pos.side === 'BUY' ? snap.quote.bid : snap.quote.ask;
-          const pnlUsd = calculateXauPnl(pos.side, pos.lots, pos.entryPrice, closePrice);
-          const points =
-            pos.side === 'BUY' ? closePrice - pos.entryPrice : pos.entryPrice - closePrice;
-          totalPnl += pnlUsd;
-          closedCount += 1;
-          closedListNow.push({
-            id: pos.id,
-            side: pos.side,
-            lots: pos.lots,
-            entryPrice: pos.entryPrice,
-            closePrice: Number(closePrice.toFixed(2)),
-            stopLoss: pos.stopLoss,
-            takeProfit: pos.takeProfit,
-            openedAt: pos.openedAt,
-            closedAt: Date.now(),
-            pnlUsd,
-            points: Number(points.toFixed(2)),
-            closeReason: 'AI Exit',
-            source: pos.source,
-            setupPattern: pos.setupPattern,
-          });
-        }
+      for (const pos of activePositionsRef.current) {
+        if (!targetIds.has(pos.id)) continue;
+        const posSym = normalizeTradingSymbol(pos.symbol);
+        const symMeta = getSymbolMeta(posSym);
+        const quote =
+          normalizeTradingSymbol(snap.quote.symbol) === posSym
+            ? snap.quote
+            : quotesBySymbolRef.current[posSym] ?? snap.quote;
+        const closePrice = pos.side === 'BUY' ? quote.bid : quote.ask;
+        const pnlUsd = calculatePairPnl(pos.side, pos.lots, pos.entryPrice, closePrice, posSym);
+        const points =
+          pos.side === 'BUY' ? closePrice - pos.entryPrice : pos.entryPrice - closePrice;
+        totalPnl += pnlUsd;
+        closedCount += 1;
+        closedListNow.push({
+          id: pos.id,
+          symbol: posSym,
+          side: pos.side,
+          lots: pos.lots,
+          entryPrice: pos.entryPrice,
+          closePrice: Number(closePrice.toFixed(symMeta.decimals)),
+          stopLoss: pos.stopLoss,
+          takeProfit: pos.takeProfit,
+          openedAt: pos.openedAt,
+          closedAt: Date.now(),
+          pnlUsd,
+          points: Number(points.toFixed(symMeta.decimals)),
+          closeReason: 'AI Exit',
+          source: pos.source,
+          setupPattern: pos.setupPattern,
+        });
       }
 
       if (closedListNow.length > 0) {
@@ -938,25 +1073,35 @@ export default function App() {
       try {
         const chartImageBase64 = chartRef.current?.captureChartImage() || undefined;
         const cfg = configRef.current;
+        const activeSym = activeSymbolRef.current;
+        const symMeta = getSymbolMeta(activeSym);
+        const dec = symMeta.decimals;
         const isNoSlMode = cfg.noSlAiExit ?? true;
-        const positions = activePositionsRef.current;
+        const allPositions = activePositionsRef.current;
+        const positions = allPositions.filter(
+          (p) => normalizeTradingSymbol(p.symbol) === activeSym
+        );
         const curBalance = activeBalanceRef.current;
         const snapNow = snapshotRef.current;
+        const matchingQuote =
+          snapNow && normalizeTradingSymbol(snapNow.quote.symbol) === activeSym
+            ? snapNow.quote
+            : quotesBySymbolRef.current[activeSym] ?? null;
 
         const openSummary =
           positions.length === 0
-            ? 'Tidak ada posisi aktif'
+            ? `Tidak ada posisi aktif di ${activeSym}`
             : positions
-                .map((p) => `${p.side} ${p.lots} lot @ ${p.entryPrice}`)
+                .map((p) => `${p.side} ${p.lots} lot @ ${p.entryPrice.toFixed(dec)}`)
                 .join(', ');
 
         const openPositionsDetail = positions.map((p) => {
-          const mark = snapNow
+          const mark = matchingQuote
             ? p.side === 'BUY'
-              ? snapNow.quote.bid
-              : snapNow.quote.ask
+              ? matchingQuote.bid
+              : matchingQuote.ask
             : p.entryPrice;
-          const floatingPnlUsd = calculateXauPnl(p.side, p.lots, p.entryPrice, mark);
+          const floatingPnlUsd = calculatePairPnl(p.side, p.lots, p.entryPrice, mark, activeSym);
           const openedMinutesAgo = Math.max(0, Math.round((Date.now() - p.openedAt) / 60000));
           return {
             id: p.id,
@@ -971,7 +1116,10 @@ export default function App() {
 
         const nowMs = Date.now();
         const recentClosedTrades: RecentClosedTradeContext[] = closedTradesRef.current
-          .filter((t) => nowMs - t.closedAt <= 120 * 60_000)
+          .filter(
+            (t) =>
+              normalizeTradingSymbol(t.symbol) === activeSym && nowMs - t.closedAt <= 120 * 60_000
+          )
           .slice(0, 5)
           .map((t) => ({
             side: t.side,
@@ -986,6 +1134,7 @@ export default function App() {
           }));
 
         const requestBody = JSON.stringify({
+          symbol: activeSym,
           chartImageBase64,
           strategyFocus: cfg.strategyFocus,
           brokerFeed: cfg.brokerFeed ?? 'PEPPERSTONE',
@@ -1051,9 +1200,16 @@ export default function App() {
 
         if (data.snapshot) {
           setSnapshot(data.snapshot);
+          setQuotesBySymbol((prev) => ({
+            ...prev,
+            [normalizeTradingSymbol(data.snapshot!.quote.symbol)]: data.snapshot!.quote,
+          }));
         }
 
-        const analysis = data.analysis;
+        const analysis: EaAnalysisResult = {
+          ...data.analysis,
+          symbol: normalizeTradingSymbol(data.analysis.symbol ?? activeSym),
+        };
         lastAnalyzedCandleRef.current = analysis.candleTime;
         setAnalysisLogs((prev) => [analysis, ...prev].slice(0, 50));
 
@@ -1073,11 +1229,12 @@ export default function App() {
         ) {
           didCloseByAi = await closePositionsByAiDecision(
             analysis.positionDecision,
-            analysis.positionReason || analysis.judgeVerdict || analysis.summary
+            analysis.positionReason || analysis.judgeVerdict || analysis.summary,
+            activeSym
           );
         }
 
-        // Notify user of calculated % risk when Gemini identifies an actionable setup
+        // Notify user of calculated % risk when AI identifies an actionable setup
         const recPlan = analysis.recoveryPlan;
         const hasImmediateRecovery = Boolean(
           (cfg.mathRecoveryEnabled ?? true) && recPlan?.isActive && recPlan.mode === 'EXECUTE_NOW'
@@ -1087,21 +1244,25 @@ export default function App() {
             ? recPlan!.recoveryLots
             : cfg.lotMode === 'FIXED_LOT'
             ? cfg.fixedLot
-            : calculateXauLotSize(
+            : calculatePairLotSize(
                 curBalance,
                 cfg.riskPercent,
                 analysis.entryPrice,
-                analysis.stopLoss
+                analysis.stopLoss,
+                activeSym
               );
           const targetTpDisplay = hasImmediateRecovery ? recPlan!.recoveryTp : analysis.takeProfit1;
           const signalRiskUsd = Number(
-            (Math.abs(analysis.entryPrice - analysis.stopLoss) * calcLots * 100).toFixed(2)
+            (Math.abs(analysis.entryPrice - analysis.stopLoss) * calcLots * symMeta.contractSize).toFixed(2)
           );
           const signalRiskPct =
             curBalance > 0 ? Number(((signalRiskUsd / curBalance) * 100).toFixed(2)) : 0;
           const activeRiskUsd = positions.reduce(
             (acc, p) =>
-              acc + (p.stopLoss > 0 ? Math.abs(p.entryPrice - p.stopLoss) * p.lots * 100 : 0),
+              acc +
+              (p.stopLoss > 0
+                ? Math.abs(p.entryPrice - p.stopLoss) * p.lots * symMeta.contractSize
+                : 0),
             0
           );
           const activeRiskPct =
@@ -1115,12 +1276,12 @@ export default function App() {
                 ? 'WARNING'
                 : 'INFO',
             title: hasImmediateRecovery
-              ? `Matematikal Recovery 100%: ${analysis.signal} (${analysis.confidence}%)`
-              : `Sinyal Gemini ${analysis.signal} (${analysis.confidence}%)`,
+              ? `Matematikal Recovery 100% ${activeSym}: ${analysis.signal} (${analysis.confidence}%)`
+              : `Sinyal AI ${activeSym} ${analysis.signal} (${analysis.confidence}%)`,
             message: hasImmediateRecovery
-              ? `Recovery loss -$${recPlan!.lossToRecoverUsd.toFixed(2)} via Martil ${calcLots.toFixed(2)} lot → TP ${targetTpDisplay.toFixed(2)} (+$${recPlan!.expectedNetProfitUsd.toFixed(2)} net).`
+              ? `Recovery loss -$${recPlan!.lossToRecoverUsd.toFixed(2)} via Martil ${calcLots.toFixed(2)} lot → TP ${targetTpDisplay.toFixed(dec)} (+$${recPlan!.expectedNetProfitUsd.toFixed(2)} net).`
               : isNoSlMode
-              ? `Setup ${analysis.setupPattern}. Rekomendasi ${calcLots.toFixed(2)} lot (Tanpa SL · AI Exit aktif, TP ${targetTpDisplay.toFixed(2)}).`
+              ? `Setup ${analysis.setupPattern}. Rekomendasi ${calcLots.toFixed(2)} lot (Tanpa SL · AI Exit aktif, TP ${targetTpDisplay.toFixed(dec)}).`
               : `Setup ${analysis.setupPattern}. Rekomendasi ${calcLots.toFixed(
                   2
                 )} lot dengan risiko ${signalRiskPct.toFixed(2)}% ($${signalRiskUsd.toFixed(2)}).`,
@@ -1132,11 +1293,14 @@ export default function App() {
 
         // Auto-Execution Guardrail Check (100% AI Judge authority for fresh entry; >=80% confidence for same-side layering/Martil; + Mathematical 100% Recovery when invalidated/loss streak)
         const postClosePositions = activePositionsRef.current;
+        const postCloseForSym = postClosePositions.filter(
+          (p) => normalizeTradingSymbol(p.symbol) === activeSym
+        );
         const isFullAi = cfg.fullAiControl ?? true;
-        const hasOppositeOpenPosition = postClosePositions.some(
+        const hasOppositeOpenPosition = postCloseForSym.some(
           (p) => p.side !== analysis.signal
         );
-        const hasSameSideOpen = postClosePositions.some((p) => p.side === analysis.signal);
+        const hasSameSideOpen = postCloseForSym.some((p) => p.side === analysis.signal);
         const sameSideAllowed =
           (cfg.allowSameSideLayering ?? true) &&
           analysis.confidence >= (cfg.sameSideMinConfidence ?? 80);
@@ -1193,7 +1357,7 @@ export default function App() {
         }
       } catch (err: unknown) {
         setAnalysisError(
-          err instanceof Error ? err.message : 'Terjadi kesalahan saat memanggil endpoint Gemini.'
+          err instanceof Error ? err.message : 'Terjadi kesalahan saat memanggil endpoint AI.'
         );
       } finally {
         isAnalyzingRef.current = false;
@@ -1312,7 +1476,6 @@ export default function App() {
 
   const handleClosePosition = useCallback(async (id: string) => {
     const snap = snapshotRef.current;
-    if (!snap) return;
 
     if (mt5StatusRef.current.connected && id.startsWith('mt5_')) {
       const ticket = Number(id.replace('mt5_', ''));
@@ -1321,6 +1484,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          symbol: normalizeTradingSymbol(targetPos?.symbol),
           action: 'CLOSE',
           ticket,
           side: targetPos?.side,
@@ -1333,23 +1497,34 @@ export default function App() {
     setSimPositions((prev) => {
       const target = prev.find((p) => p.id === id);
       if (!target) return prev;
-      const closePrice = target.side === 'BUY' ? snap.quote.bid : snap.quote.ask;
-      const pnlUsd = calculateXauPnl(target.side, target.lots, target.entryPrice, closePrice);
+      const targetSym = normalizeTradingSymbol(target.symbol);
+      const symMeta = getSymbolMeta(targetSym);
+      const quote =
+        snap && normalizeTradingSymbol(snap.quote.symbol) === targetSym
+          ? snap.quote
+          : quotesBySymbolRef.current[targetSym] ?? snap?.quote ?? null;
+      const closePrice = quote
+        ? target.side === 'BUY'
+          ? quote.bid
+          : quote.ask
+        : target.entryPrice;
+      const pnlUsd = calculatePairPnl(target.side, target.lots, target.entryPrice, closePrice, targetSym);
       const points =
         target.side === 'BUY' ? closePrice - target.entryPrice : target.entryPrice - closePrice;
 
       const closed: ClosedTrade = {
         id: target.id,
+        symbol: targetSym,
         side: target.side,
         lots: target.lots,
         entryPrice: target.entryPrice,
-        closePrice: Number(closePrice.toFixed(2)),
+        closePrice: Number(closePrice.toFixed(symMeta.decimals)),
         stopLoss: target.stopLoss,
         takeProfit: target.takeProfit,
         openedAt: target.openedAt,
         closedAt: Date.now(),
         pnlUsd,
-        points: Number(points.toFixed(2)),
+        points: Number(points.toFixed(symMeta.decimals)),
         closeReason: 'Manual Close',
         source: target.source,
         setupPattern: target.setupPattern,
@@ -1380,16 +1555,19 @@ export default function App() {
     (side: 'BUY' | 'SELL') => {
       const snap = snapshotRef.current;
       if (!snap) return;
+      const orderSym = normalizeTradingSymbol(snap.quote.symbol || activeSymbolRef.current);
+      const symMeta = getSymbolMeta(orderSym);
+      const dec = symMeta.decimals;
       const cfg = configRef.current;
       const isScalp =
         cfg.strategyFocus === 'UNIFIED_8IN1' ||
         cfg.strategyFocus === 'ADAPTIVE_SCALP' ||
         cfg.strategyFocus === 'SCALPING_EMA' ||
         cfg.strategyFocus === 'ULTRA_SCALP';
-      const atr = snap.indicators.atr14 ?? 2.5;
+      const atr = snap.indicators.atr14 ?? symMeta.defaultAtr;
       const entry = side === 'BUY' ? snap.quote.ask : snap.quote.bid;
-      const slDist = Number((atr * (isScalp ? 1.0 : 1.5)).toFixed(2));
-      const tpDist = Number((atr * (isScalp ? 1.35 : 2.5)).toFixed(2));
+      const slDist = Number((atr * (isScalp ? 1.0 : 1.5)).toFixed(dec));
+      const tpDist = Number((atr * (isScalp ? 1.35 : 2.5)).toFixed(dec));
 
       void openOrder({
         side,
@@ -1406,21 +1584,25 @@ export default function App() {
 
   const handleExecuteAiSignal = useCallback(() => {
     if (!latestAnalysis || latestAnalysis.signal === 'HOLD') return;
-    const hasOpposite = activePositionsRef.current.some(
+    const analysisSym = normalizeTradingSymbol(latestAnalysis.symbol ?? activeSymbolRef.current);
+    const sameSymPositions = activePositionsRef.current.filter(
+      (p) => normalizeTradingSymbol(p.symbol) === analysisSym
+    );
+    const hasOpposite = sameSymPositions.some(
       (p) => p.side !== latestAnalysis.signal
     );
     if (hasOpposite) {
       pushRiskNotification({
         level: 'WARNING',
         title: 'Anti-Hedging Aktif',
-        message: `Sinyal ${latestAnalysis.signal} ditahan karena masih ada posisi berlawanan arah yang KEEP.`,
+        message: `Sinyal ${latestAnalysis.signal} ${analysisSym} ditahan karena masih ada posisi berlawanan arah yang KEEP.`,
         tradeRiskPercent: 0,
         tradeRiskUsd: 0,
         totalExposurePercent: 0,
       });
       return;
     }
-    const hasSameSide = activePositionsRef.current.some(
+    const hasSameSide = sameSymPositions.some(
       (p) => p.side === latestAnalysis.signal
     );
     const useRecovery =
@@ -1454,13 +1636,19 @@ export default function App() {
       const total = mt5Status.liveAccount.positions.reduce((acc, p) => acc + p.profit, 0);
       return Number(total.toFixed(2));
     }
-    if (!snapshot || activePositions.length === 0) return 0;
+    if (activePositions.length === 0) return 0;
     const total = activePositions.reduce((acc, pos) => {
-      const mark = pos.side === 'BUY' ? snapshot.quote.bid : snapshot.quote.ask;
-      return acc + calculateXauPnl(pos.side, pos.lots, pos.entryPrice, mark);
+      const posSym = normalizeTradingSymbol(pos.symbol);
+      const quote =
+        snapshot && normalizeTradingSymbol(snapshot.quote.symbol) === posSym
+          ? snapshot.quote
+          : quotesBySymbol[posSym] ?? null;
+      if (!quote) return acc;
+      const mark = pos.side === 'BUY' ? quote.bid : quote.ask;
+      return acc + calculatePairPnl(pos.side, pos.lots, pos.entryPrice, mark, posSym);
     }, 0);
     return Number(total.toFixed(2));
-  }, [isMt5Live, mt5Status.liveAccount, snapshot, activePositions]);
+  }, [isMt5Live, mt5Status.liveAccount, snapshot, quotesBySymbol, activePositions]);
 
   const equity =
     isMt5Live && mt5Status.liveAccount
@@ -1493,6 +1681,7 @@ export default function App() {
         onSelectTab={setActiveTab}
         onAnalyzeNow={() => void runGeminiAnalysis(false)}
         isAnalyzing={isAnalyzing}
+        timeframe={activeTimeframe}
       />
 
       <OfflineIndicator />
@@ -1501,8 +1690,11 @@ export default function App() {
         quote={snapshot?.quote ?? null}
         indicators={snapshot?.indicators ?? null}
         macroContext={macroContext}
+        symbol={activeSymbol}
+        onChangeSymbol={handleChangeSymbol}
         brokerFeed={activeBrokerFeed}
         timeframe={activeTimeframe}
+        onChangeTimeframe={handleChangeTimeframe}
         onChangeBrokerFeed={(broker) => {
           setSnapshot(null);
           setConfig((prev) => ({ ...prev, brokerFeed: broker }));
@@ -1524,8 +1716,11 @@ export default function App() {
               <CandlestickChart
                 ref={chartRef}
                 snapshot={snapshot}
+                symbol={activeSymbol}
+                onChangeSymbol={handleChangeSymbol}
                 brokerFeed={activeBrokerFeed}
                 timeframe={activeTimeframe}
+                onChangeTimeframe={handleChangeTimeframe}
                 latestAnalysis={latestAnalysis}
                 openPositions={activePositions}
                 noSlAiExit={isNoSlMode}
@@ -1537,6 +1732,8 @@ export default function App() {
                 analysis={latestAnalysis}
                 quote={snapshot?.quote ?? null}
                 config={config}
+                symbol={activeSymbol}
+                onChangeSymbol={handleChangeSymbol}
                 timeframe={activeTimeframe}
                 balance={activeBalance}
                 atr14={snapshot?.indicators.atr14 ?? null}
@@ -1551,12 +1748,22 @@ export default function App() {
                 onToggleAutoAnalyze={() =>
                   setConfig((prev) => ({ ...prev, autoAnalyze: !prev.autoAnalyze }))
                 }
+                onChangeTimeframe={handleChangeTimeframe}
                 onChangeAnalyzeCadence={(cadence) => {
-                  const nextTf = getTimeframeForCadence(cadence);
-                  if (nextTf !== activeTimeframe) {
+                  const syncedTf =
+                    cadence === '900S' || cadence === '1800S' || cadence === '3600S'
+                      ? getTimeframeForCadence(cadence)
+                      : activeTimeframe;
+                  if (syncedTf !== activeTimeframe) {
                     setSnapshot(null);
                   }
-                  setConfig((prev) => ({ ...prev, analyzeCadence: cadence }));
+                  setConfig((prev) => ({
+                    ...prev,
+                    analyzeCadence: cadence,
+                    ...(cadence === '900S' || cadence === '1800S' || cadence === '3600S'
+                      ? { chartTimeframe: syncedTf }
+                      : {}),
+                  }));
                 }}
                 onToggleAutoExecute={() =>
                   setConfig((prev) => ({ ...prev, autoExecute: !prev.autoExecute }))
@@ -1581,6 +1788,7 @@ export default function App() {
               closedTrades={closedTrades}
               analysisLogs={analysisLogs}
               quote={snapshot?.quote ?? null}
+              quotesBySymbol={quotesBySymbol}
               onClosePosition={(id) => void handleClosePosition(id)}
               onCloseAll={() => void handleCloseAll()}
             />
@@ -1602,10 +1810,17 @@ export default function App() {
             isMt5Live={isMt5Live}
             aiHealth={aiHealth}
             onUpdateConfig={(patch) => {
-              if (
-                patch.analyzeCadence &&
-                getTimeframeForCadence(patch.analyzeCadence) !== activeTimeframe
-              ) {
+              const nextSym = patch.tradingSymbol
+                ? normalizeTradingSymbol(patch.tradingSymbol)
+                : activeSymbol;
+              const nextTf =
+                patch.chartTimeframe ??
+                (patch.analyzeCadence === '900S' ||
+                patch.analyzeCadence === '1800S' ||
+                patch.analyzeCadence === '3600S'
+                  ? getTimeframeForCadence(patch.analyzeCadence)
+                  : activeTimeframe);
+              if (nextTf !== activeTimeframe || nextSym !== activeSymbol) {
                 setSnapshot(null);
               }
               setConfig((prev) => ({ ...prev, ...patch }));

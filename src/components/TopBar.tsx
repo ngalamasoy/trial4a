@@ -1,6 +1,7 @@
 import React from 'react';
 import { Sparkles, Loader2 } from 'lucide-react';
 import { PWAInstallButton } from './PWAInstallButton.tsx';
+import type { ChartTimeframe } from '../types/trading.ts';
 
 export type ActiveTab = 'terminal' | 'analytics' | 'settings' | 'bridge';
 
@@ -9,6 +10,7 @@ interface TopBarProps {
   onSelectTab: (tab: ActiveTab) => void;
   onAnalyzeNow: () => void;
   isAnalyzing: boolean;
+  timeframe?: ChartTimeframe;
 }
 
 const NAV_ITEMS: Array<{ id: ActiveTab; label: string }> = [
@@ -23,6 +25,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onSelectTab,
   onAnalyzeNow,
   isAnalyzing,
+  timeframe = 'M5',
 }) => {
   return (
     <header className="h-14 border-b border-white/[0.08] bg-[#0B0E14] px-3 sm:px-4 lg:px-6 flex items-center justify-between gap-3 sm:gap-6">
@@ -69,7 +72,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           {isAnalyzing ? (
             <>
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              <span className="hidden sm:inline">Menganalisa M5...</span>
+              <span className="hidden sm:inline">Menganalisa {timeframe}...</span>
               <span className="sm:hidden">Analisa...</span>
             </>
           ) : (

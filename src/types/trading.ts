@@ -178,19 +178,40 @@ export const BROKER_FEEDS: BrokerFeedOption[] = [
   },
 ];
 
-export type ChartTimeframe = 'M5' | 'M15' | 'M30' | 'H1';
+export type ChartTimeframe = 'M1' | 'M5' | 'M15' | 'M30' | 'H1';
 
 export interface TimeframeMeta {
   id: ChartTimeframe;
   label: string;
   seconds: number;
-  tvResolution: '5' | '15' | '30' | '60';
-  binanceInterval: '5m' | '15m' | '30m' | '1h';
-  yahooInterval: '5m' | '15m' | '30m' | '60m';
-  krakenInterval: 5 | 15 | 30 | 60;
+  tvResolution: '1' | '5' | '15' | '30' | '60';
+  binanceInterval: '1m' | '5m' | '15m' | '30m' | '1h';
+  yahooInterval: '1m' | '5m' | '15m' | '30m' | '60m';
+  krakenInterval: 1 | 5 | 15 | 30 | 60;
 }
 
+export const CHART_TIMEFRAME_OPTIONS: Array<{
+  id: ChartTimeframe;
+  label: string;
+  fullLabel: string;
+}> = [
+  { id: 'M1', label: 'M1', fullLabel: 'M1 (1 Menit)' },
+  { id: 'M5', label: 'M5', fullLabel: 'M5 (5 Menit)' },
+  { id: 'M15', label: 'M15', fullLabel: 'M15 (15 Menit)' },
+  { id: 'M30', label: 'M30', fullLabel: 'M30 (30 Menit)' },
+  { id: 'H1', label: 'H1', fullLabel: 'H1 (60 Menit)' },
+];
+
 export const TIMEFRAME_META: Record<ChartTimeframe, TimeframeMeta> = {
+  M1: {
+    id: 'M1',
+    label: 'M1',
+    seconds: 60,
+    tvResolution: '1',
+    binanceInterval: '1m',
+    yahooInterval: '1m',
+    krakenInterval: 1,
+  },
   M5: {
     id: 'M5',
     label: 'M5',
@@ -234,6 +255,184 @@ export function getTimeframeForCadence(cadence: EaConfig['analyzeCadence']): Cha
   if (cadence === '1800S') return 'M30';
   if (cadence === '3600S') return 'H1';
   return 'M5';
+}
+
+export type TradingSymbol = 'XAU/USD' | 'GBP/USD' | 'EUR/USD' | 'BTC/USD';
+
+export interface SymbolMeta {
+  id: TradingSymbol;
+  label: string;
+  shortName: string;
+  mt5Symbol: string;
+  decimals: number;
+  minMove: number;
+  contractSize: number;
+  defaultAtr: number;
+  minSlDistance: number;
+  spreadFallback: number;
+  roundIncrement: number;
+  fastBullPairId: number | null;
+  unitLabel: string;
+  tvDefaultSymbol: string;
+  yahooSymbols: string[];
+  binanceSymbol: string | null;
+  krakenSymbol: string | null;
+  assetClass: 'METAL' | 'FOREX' | 'CRYPTO';
+}
+
+export const SYMBOL_OPTIONS: Array<{
+  id: TradingSymbol;
+  label: string;
+  description: string;
+}> = [
+  { id: 'XAU/USD', label: 'XAU/USD', description: 'Gold Spot vs US Dollar' },
+  { id: 'GBP/USD', label: 'GBP/USD', description: 'British Pound vs US Dollar' },
+  { id: 'EUR/USD', label: 'EUR/USD', description: 'Euro vs US Dollar' },
+  { id: 'BTC/USD', label: 'BTC/USD', description: 'Bitcoin vs US Dollar (24/7)' },
+];
+
+export const SYMBOL_META: Record<TradingSymbol, SymbolMeta> = {
+  'XAU/USD': {
+    id: 'XAU/USD',
+    label: 'XAU/USD',
+    shortName: 'Gold',
+    mt5Symbol: 'XAUUSD',
+    decimals: 2,
+    minMove: 0.01,
+    contractSize: 100,
+    defaultAtr: 2.5,
+    minSlDistance: 0.25,
+    spreadFallback: 0.16,
+    roundIncrement: 10,
+    fastBullPairId: 28,
+    unitLabel: 'USD/oz',
+    tvDefaultSymbol: 'OANDA:XAUUSD',
+    yahooSymbols: ['XAUUSD=X', 'GC=F'],
+    binanceSymbol: 'PAXGUSDT',
+    krakenSymbol: 'PAXGUSD',
+    assetClass: 'METAL',
+  },
+  'GBP/USD': {
+    id: 'GBP/USD',
+    label: 'GBP/USD',
+    shortName: 'Cable',
+    mt5Symbol: 'GBPUSD',
+    decimals: 5,
+    minMove: 0.00001,
+    contractSize: 100_000,
+    defaultAtr: 0.0012,
+    minSlDistance: 0.0002,
+    spreadFallback: 0.00014,
+    roundIncrement: 0.005,
+    fastBullPairId: 3,
+    unitLabel: 'USD',
+    tvDefaultSymbol: 'OANDA:GBPUSD',
+    yahooSymbols: ['GBPUSD=X'],
+    binanceSymbol: null,
+    krakenSymbol: null,
+    assetClass: 'FOREX',
+  },
+  'EUR/USD': {
+    id: 'EUR/USD',
+    label: 'EUR/USD',
+    shortName: 'Fiber',
+    mt5Symbol: 'EURUSD',
+    decimals: 5,
+    minMove: 0.00001,
+    contractSize: 100_000,
+    defaultAtr: 0.0009,
+    minSlDistance: 0.0002,
+    spreadFallback: 0.00012,
+    roundIncrement: 0.005,
+    fastBullPairId: 2,
+    unitLabel: 'USD',
+    tvDefaultSymbol: 'OANDA:EURUSD',
+    yahooSymbols: ['EURUSD=X'],
+    binanceSymbol: null,
+    krakenSymbol: null,
+    assetClass: 'FOREX',
+  },
+  'BTC/USD': {
+    id: 'BTC/USD',
+    label: 'BTC/USD',
+    shortName: 'Bitcoin',
+    mt5Symbol: 'BTCUSD',
+    decimals: 2,
+    minMove: 0.01,
+    contractSize: 1,
+    defaultAtr: 180,
+    minSlDistance: 15,
+    spreadFallback: 12,
+    roundIncrement: 500,
+    fastBullPairId: null,
+    unitLabel: 'USD',
+    tvDefaultSymbol: 'COINBASE:BTCUSD',
+    yahooSymbols: ['BTC-USD'],
+    binanceSymbol: 'BTCUSDT',
+    krakenSymbol: 'XBTUSD',
+    assetClass: 'CRYPTO',
+  },
+};
+
+export function normalizeTradingSymbol(raw?: string | null): TradingSymbol {
+  const upper = String(raw || '').trim().toUpperCase().replace(/[^A-Z]/g, '');
+  if (upper.startsWith('GBPUSD')) return 'GBP/USD';
+  if (upper.startsWith('EURUSD')) return 'EUR/USD';
+  if (upper.startsWith('BTCUSD') || upper.startsWith('XBTUSD')) return 'BTC/USD';
+  return 'XAU/USD';
+}
+
+export function getSymbolMeta(symbol?: string | null): SymbolMeta {
+  return SYMBOL_META[normalizeTradingSymbol(symbol)];
+}
+
+export function formatPairPrice(price: number | null | undefined, symbol?: string | null): string {
+  if (typeof price !== 'number' || !Number.isFinite(price)) return '--';
+  const meta = getSymbolMeta(symbol);
+  return price.toFixed(meta.decimals);
+}
+
+export function getTvSymbolForBrokerAndPair(
+  brokerId: BrokerFeedId,
+  symbol?: string | null
+): string | null {
+  const sym = normalizeTradingSymbol(symbol);
+  const compact = SYMBOL_META[sym].mt5Symbol;
+  if (sym === 'BTC/USD') {
+    switch (brokerId) {
+      case 'PEPPERSTONE':
+      case 'OANDA':
+      case 'EIGHTCAP':
+        return 'COINBASE:BTCUSD';
+      case 'TICKMILL':
+      case 'BLACKBULL':
+        return 'BITSTAMP:BTCUSD';
+      case 'ICMARKETS':
+        return 'BINANCE:BTCUSDT';
+      case 'FXCM':
+        return 'KRAKEN:BTCUSD';
+      default:
+        return null;
+    }
+  }
+  switch (brokerId) {
+    case 'PEPPERSTONE':
+      return `PEPPERSTONE:${compact}`;
+    case 'TICKMILL':
+      return `TICKMILL:${compact}`;
+    case 'ICMARKETS':
+      return sym === 'XAU/USD' ? 'ICMARKETS:XAUUSD' : `IC:${compact}`;
+    case 'OANDA':
+      return `OANDA:${compact}`;
+    case 'EIGHTCAP':
+      return `EIGHTCAP:${compact}`;
+    case 'BLACKBULL':
+      return `BLACKBULL:${compact}`;
+    case 'FXCM':
+      return `FX:${compact}`;
+    default:
+      return null;
+  }
 }
 
 export interface MarketQuote {
@@ -310,6 +509,7 @@ export interface MathematicalRecoveryPlan {
 
 export interface EaAnalysisResult {
   id: string;
+  symbol?: TradingSymbol;
   timestamp: number;
   candleTime: number;
   priceAtAnalysis: number;
@@ -364,6 +564,7 @@ export interface EaAnalysisResult {
 
 export interface OpenPosition {
   id: string;
+  symbol?: TradingSymbol;
   side: 'BUY' | 'SELL';
   lots: number;
   entryPrice: number;
@@ -380,6 +581,7 @@ export interface OpenPosition {
 
 export interface ClosedTrade {
   id: string;
+  symbol?: TradingSymbol;
   side: 'BUY' | 'SELL';
   lots: number;
   entryPrice: number;
@@ -567,6 +769,8 @@ export const AI_PROVIDER_OPTIONS: Array<{
 ];
 
 export interface EaConfig {
+  tradingSymbol?: TradingSymbol;
+  chartTimeframe?: ChartTimeframe;
   autoAnalyze: boolean;
   analyzeCadence: 'CANDLE_CLOSE' | '30S' | '60S' | '180S' | '900S' | '1800S' | '3600S';
   autoExecute: boolean;

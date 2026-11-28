@@ -11,6 +11,10 @@ import {
 } from 'lucide-react';
 import {
   AI_PROVIDER_OPTIONS,
+  CHART_TIMEFRAME_OPTIONS,
+  SYMBOL_OPTIONS,
+  getSymbolMeta,
+  normalizeTradingSymbol,
   type AiProviderMode,
   type ChartTimeframe,
   type EaAnalysisResult,
@@ -18,10 +22,13 @@ import {
   type MarketQuote,
   type Mt5BridgeStatus,
   type OpenPosition,
+  type TradingSymbol,
 } from '../types/trading.ts';
-import { calculateXauLotSize } from '../utils/indicators.ts';
+import { calculatePairLotSize } from '../utils/indicators.ts';
 
 interface EaSignalPanelProps {
+  symbol: TradingSymbol;
+  onChangeSymbol?: (sym: TradingSymbol) => void;
   analysis: EaAnalysisResult | null;
   quote: MarketQuote | null;
   config: EaConfig;
@@ -37,6 +44,7 @@ interface EaSignalPanelProps {
   analysisError: string | null;
   autoCountdownSec: number | null;
   onToggleAutoAnalyze: () => void;
+  onChangeTimeframe: (tf: ChartTimeframe) => void;
   onChangeAnalyzeCadence: (cadence: EaConfig['analyzeCadence']) => void;
   onToggleAutoExecute: () => void;
   onToggleFullAiControl: () => void;
@@ -56,6 +64,8 @@ function formatAutoCountdown(seconds: number): string {
 }
 
 export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
+  symbol,
+  onChangeSymbol,
   analysis,
   quote,
   config,
@@ -71,6 +81,7 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
   analysisError,
   autoCountdownSec,
   onToggleAutoAnalyze,
+  onChangeTimeframe,
   onChangeAnalyzeCadence,
   onToggleAutoExecute,
   onToggleFullAiControl,
@@ -79,6 +90,13 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
   onExecuteAiSignal,
   onQuickMarketOrder,
 }) => {
+  const activeSym = normalizeTradingSymbol(symbol);
+  const symMeta = getSymbolMeta(activeSym);
+  const decimals = symMeta.decimals;
+  const analysisSym = normalizeTradingSymbol(analysis?.symbol || activeSym);
+  const analysisMeta = getSymbolMeta(analysisSym);
+  const aDecimals = analysisMeta.decimals;
+
   const isFullAiControl = config.fullAiControl ?? true;
   const isNoSlMode = config.noSlAiExit ?? true;
   const isAutoPausedByPosition = config.autoAnalyze && openPositionsCount > 0 && !isNoSlMode;
@@ -94,16 +112,26 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
     analysis && analysis.signal !== 'HOLD'
       ? config.lotMode === 'FIXED_LOT'
         ? config.fixedLot
-        : calculateXauLotSize(balance, config.riskPercent, analysis.entryPrice, analysis.stopLoss)
+        : calculatePairLotSize(
+            balance,
+            config.riskPercent,
+            analysis.entryPrice,
+            analysis.stopLoss,
+            analysisSym
+          )
       : config.fixedLot;
 
   const sameSidePositions =
     analysis && analysis.signal !== 'HOLD'
-      ? openPositions.filter((p) => p.side === analysis.signal)
+      ? openPositions.filter(
+          (p) => normalizeTradingSymbol(p.symbol) === analysisSym && p.side === analysis.signal
+        )
       : [];
   const oppositePositions =
     analysis && analysis.signal !== 'HOLD'
-      ? openPositions.filter((p) => p.side !== analysis.signal)
+      ? openPositions.filter(
+          (p) => normalizeTradingSymbol(p.symbol) === analysisSym && p.side !== analysis.signal
+        )
       : [];
   const isSameSideLayer = Boolean(
     analysis && analysis.signal !== 'HOLD' && sameSidePositions.length > 0
@@ -133,7 +161,7 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
       : analysis?.takeProfit1 ?? 0;
 
   // Compute exact % risk for the next order (AI signal if actionable, else market order)
-  const atrVal = atr14 ?? 2.5;
+  const atrVal = atr14 ?? symMeta.defaultAtr;
   const isScalpMode =
     config.strategyFocus === 'UNIFIED_8IN1' ||
     config.strategyFocus === 'ADAPTIVE_SCALP' ||
@@ -153,16 +181,18 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
       : 'Balanced M5';
 
   const previewRiskSlDist =
-    analysis && analysis.signal !== 'HOLD'
+    analysis && analysis.signal !== 'HOLD' && analysisSym === activeSym
       ? Math.abs(analysis.entryPrice - analysis.stopLoss)
-      : Number((atrVal * (isScalpMode ? 1.0 : 1.5)).toFixed(2));
+      : Number((atrVal * (isScalpMode ? 1.0 : 1.5)).toFixed(decimals));
   const previewLot =
-    analysis && analysis.signal !== 'HOLD'
+    analysis && analysis.signal !== 'HOLD' && analysisSym === activeSym
       ? suggestedLot
       : config.lotMode === 'FIXED_LOT'
       ? config.fixedLot
-      : calculateXauLotSize(balance, config.riskPercent, 0, previewRiskSlDist);
-  const previewRiskUsd = Number((previewRiskSlDist * previewLot * 100).toFixed(2));
+      : calculatePairLotSize(balance, config.riskPercent, 0, previewRiskSlDist, activeSym);
+  const previewRiskUsd = Number(
+    (previewRiskSlDist * previewLot * symMeta.contractSize).toFixed(2)
+  );
   const previewRiskPct = balance > 0 ? Number(((previewRiskUsd / balance) * 100).toFixed(2)) : 0;
 
   return (
@@ -292,6 +322,44 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
             </button>
           </div>
 
+          {onChangeSymbol && (
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="panel-pair-select" className="text-[#E6EDF3] font-medium">
+                Pair Trading
+              </label>
+              <select
+                id="panel-pair-select"
+                value={activeSym}
+                onChange={(e) => onChangeSymbol(e.target.value as TradingSymbol)}
+                className="px-2 py-1 text-[11px] font-mono rounded bg-[#0B0E14] border border-[#D4AF37]/45 text-[#F8FAFC] font-semibold focus:outline-none focus:border-[#D4AF37] cursor-pointer"
+              >
+                {SYMBOL_OPTIONS.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between gap-2">
+            <label htmlFor="panel-tf-select" className="text-[#E6EDF3] font-medium">
+              Timeframe Chart
+            </label>
+            <select
+              id="panel-tf-select"
+              value={timeframe}
+              onChange={(e) => onChangeTimeframe(e.target.value as ChartTimeframe)}
+              className="px-2 py-1 text-[11px] font-mono rounded bg-[#0B0E14] border border-[#D4AF37]/35 text-[#D4AF37] font-semibold focus:outline-none focus:border-[#D4AF37] cursor-pointer"
+            >
+              {CHART_TIMEFRAME_OPTIONS.map((tf) => (
+                <option key={tf.id} value={tf.id}>
+                  {tf.fullLabel}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <div className="flex items-center justify-between gap-2">
             <label htmlFor="panel-cadence-select" className="text-[#E6EDF3] font-medium">
               Interval Auto-Scan
@@ -304,10 +372,10 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
               }
               className="px-2 py-1 text-[11px] rounded bg-[#0B0E14] border border-white/[0.12] text-[#F8FAFC] focus:outline-none focus:border-[#D4AF37] cursor-pointer"
             >
-              <option value="30S">30 Detik (Chart M5)</option>
-              <option value="60S">60 Detik (Chart M5)</option>
-              <option value="180S">3 Menit (Chart M5)</option>
-              <option value="CANDLE_CLOSE">5 Menit (Chart M5 Close)</option>
+              <option value="30S">30 Detik (TF {timeframe})</option>
+              <option value="60S">60 Detik (TF {timeframe})</option>
+              <option value="180S">3 Menit (TF {timeframe})</option>
+              <option value="CANDLE_CLOSE">Tutup Candle {timeframe}</option>
               <option value="900S">15 Menit (Chart M15)</option>
               <option value="1800S">30 Menit (Chart M30)</option>
               <option value="3600S">60 Menit (Chart H1)</option>
@@ -361,10 +429,10 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
         {!analysis ? (
           <div className="py-10 text-center space-y-3">
             <p className="text-sm font-medium text-[#E6EDF3]">
-              Siap Menganalisa Chart {timeframe}
+              Siap Menganalisa {activeSym} {timeframe}
             </p>
             <p className="text-xs text-[#94A3B8] leading-relaxed max-w-xs mx-auto">
-              Klik <strong className="text-[#F8FAFC]">Analisa Chart</strong> untuk mengirim snapshot visual chart candlestick dan data indikator teknikal {timeframe} ke endpoint Gemini.
+              Klik <strong className="text-[#F8FAFC]">Analisa Chart</strong> untuk mengirim snapshot visual chart candlestick {activeSym} dan data indikator teknikal {timeframe} ke endpoint Gemini.
             </p>
             <button
               type="button"
@@ -392,6 +460,9 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
                   )}
                   <span className={`text-2xl font-bold tracking-tight ${signalColor}`}>
                     {analysis.signal}
+                  </span>
+                  <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-white/[0.06] text-[#D4AF37]">
+                    {analysisSym}
                   </span>
                   <span className="text-xs text-[#94A3B8] font-mono tabular-nums ml-1">
                     {analysis.confidence}% confidence
@@ -421,7 +492,7 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
               <div className="bg-[#0B0E14] p-2.5">
                 <div className="text-[#94A3B8] text-[11px]">Entry Referensi</div>
                 <div className="text-[#F8FAFC] font-semibold mt-0.5">
-                  {analysis.entryPrice.toFixed(2)}
+                  {analysis.entryPrice.toFixed(aDecimals)}
                 </div>
               </div>
               <div className="bg-[#0B0E14] p-2.5">
@@ -430,25 +501,25 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
                   <div className="text-[#D4AF37] font-semibold mt-0.5 font-sans text-[11px]">
                     Tanpa SL (AI Exit)
                     <span className="block text-[10px] text-[#94A3B8] font-mono font-normal">
-                      Ref: {analysis.stopLoss.toFixed(2)}
+                      Ref: {analysis.stopLoss.toFixed(aDecimals)}
                     </span>
                   </div>
                 ) : (
                   <div className="text-[#EF4444] font-semibold mt-0.5">
-                    {analysis.stopLoss.toFixed(2)}
+                    {analysis.stopLoss.toFixed(aDecimals)}
                   </div>
                 )}
               </div>
               <div className="bg-[#0B0E14] p-2.5">
                 <div className="text-[#94A3B8] text-[11px]">Take Profit 1</div>
                 <div className="text-[#10B981] font-semibold mt-0.5">
-                  {analysis.takeProfit1.toFixed(2)}
+                  {analysis.takeProfit1.toFixed(aDecimals)}
                 </div>
               </div>
               <div className="bg-[#0B0E14] p-2.5">
                 <div className="text-[#94A3B8] text-[11px]">TP2 / Risk:Reward</div>
                 <div className="text-[#10B981] font-semibold mt-0.5">
-                  {analysis.takeProfit2.toFixed(2)}{' '}
+                  {analysis.takeProfit2.toFixed(aDecimals)}{' '}
                   <span className="text-[#94A3B8] font-normal">({analysis.riskRewardRatio})</span>
                 </div>
               </div>
@@ -516,7 +587,7 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
                         TP Gabungan (Prob ≥{analysis.highProbTpConfidence ?? 85}%):
                       </span>
                       <span className="font-semibold text-[#D4AF37]">
-                        {analysis.highProbTp.toFixed(2)}
+                        {analysis.highProbTp.toFixed(aDecimals)}
                       </span>
                     </div>
                   )}
@@ -568,13 +639,13 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
                   <div className="flex justify-between">
                     <span className="text-[#94A3B8]">Breakeven:</span>
                     <span className="text-[#E6EDF3]">
-                      {analysis.recoveryPlan.breakevenPrice.toFixed(2)}
+                      {analysis.recoveryPlan.breakevenPrice.toFixed(aDecimals)}
                     </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-[#94A3B8]">TP Pulih 100%:</span>
                     <span className="text-[#10B981] font-semibold">
-                      {analysis.recoveryPlan.recoveryTp.toFixed(2)} (+$
+                      {analysis.recoveryPlan.recoveryTp.toFixed(aDecimals)} (+$
                       {analysis.recoveryPlan.expectedNetProfitUsd.toFixed(2)})
                     </span>
                   </div>
@@ -706,7 +777,11 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
                 )}
                 {analysis.fastBullPositionSummary && (
                   <p className="text-[#E6EDF3] leading-relaxed">
-                    <span className="text-[#F59E0B] font-medium">FastBull Position Book (XAUUSD): </span>
+                    <span className="text-[#F59E0B] font-medium">
+                      {analysisSym === 'BTC/USD'
+                        ? 'Order Book Depth (BTCUSDT): '
+                        : `FastBull Position Book (${analysisMeta.mt5Symbol}): `}
+                    </span>
                     {analysis.fastBullPositionSummary}
                   </p>
                 )}
@@ -726,8 +801,8 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
                   <div className="pt-1 border-t border-white/[0.06] flex items-center justify-between font-mono tabular-nums text-[#10B981]">
                     <span className="font-sans text-[#94A3B8]">Lock Profit Plan:</span>
                     <span>
-                      25%: {analysis.lockProfitPlan.lock25Price.toFixed(2)} · 50%:{' '}
-                      {analysis.lockProfitPlan.lock50Price.toFixed(2)}
+                      25%: {analysis.lockProfitPlan.lock25Price.toFixed(aDecimals)} · 50%:{' '}
+                      {analysis.lockProfitPlan.lock50Price.toFixed(aDecimals)}
                     </span>
                   </div>
                 )}
@@ -830,13 +905,13 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
                 {isSameSideLayer
                   ? `${isMartilLayer ? 'Martil' : 'Layer'} ${analysis.signal} ${suggestedLot.toFixed(
                       2
-                    )} Lot · TP Keduanya ${effectiveTpDisplay.toFixed(2)} (≥${
+                    )} Lot · TP Keduanya ${effectiveTpDisplay.toFixed(aDecimals)} (≥${
                       analysis.highProbTpConfidence ?? 85
                     }%)`
                   : isNoSlMode
                   ? `Eksekusi ${analysis.signal} AI (${suggestedLot.toFixed(
                       2
-                    )} Lot · Tanpa SL · TP ${analysis.takeProfit1.toFixed(2)})`
+                    )} Lot · Tanpa SL · TP ${analysis.takeProfit1.toFixed(aDecimals)})`
                   : `Eksekusi ${analysis.signal} AI (${suggestedLot.toFixed(
                       2
                     )} Lot · Risk ${previewRiskPct.toFixed(2)}%)`}
@@ -851,7 +926,7 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
               disabled={!quote}
               className="py-2 px-3 text-xs font-semibold rounded-md border border-[#10B981]/40 bg-[#10B981]/10 text-[#10B981] hover:bg-[#10B981]/20 disabled:opacity-40 transition-colors font-mono tabular-nums"
             >
-              Buy {quote ? quote.ask.toFixed(2) : '--'}
+              Buy {quote ? quote.ask.toFixed(decimals) : '--'}
             </button>
             <button
               type="button"
@@ -859,7 +934,7 @@ export const EaSignalPanel: React.FC<EaSignalPanelProps> = ({
               disabled={!quote}
               className="py-2 px-3 text-xs font-semibold rounded-md border border-[#EF4444]/40 bg-[#EF4444]/10 text-[#EF4444] hover:bg-[#EF4444]/20 disabled:opacity-40 transition-colors font-mono tabular-nums"
             >
-              Sell {quote ? quote.bid.toFixed(2) : '--'}
+              Sell {quote ? quote.bid.toFixed(decimals) : '--'}
             </button>
           </div>
         </div>

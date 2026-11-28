@@ -9,6 +9,9 @@ import crypto from 'crypto';
 import {
   BROKER_FEEDS,
   TIMEFRAME_META,
+  getSymbolMeta,
+  getTvSymbolForBrokerAndPair,
+  normalizeTradingSymbol,
   type AiProviderMode,
   type BrokerFeedId,
   type Candle,
@@ -23,6 +26,7 @@ import {
   type PositionDecision,
   type PostTpDecision,
   type RecentClosedTradeContext,
+  type TradingSymbol,
 } from './src/types/trading.ts';
 import {
   analyzeChartStructure,
@@ -641,6 +645,7 @@ async function generateAnalysisViaOpenRouterChat(opts: {
   compactPromptText?: string;
   chartImageBase64?: string;
   thinkingHigh?: boolean;
+  symbol?: TradingSymbol;
 }): Promise<{ rawText: string; model: string; usedChartVision: boolean }> {
   const {
     cfg,
@@ -651,7 +656,18 @@ async function generateAnalysisViaOpenRouterChat(opts: {
     compactPromptText,
     chartImageBase64,
     thinkingHigh = true,
+    symbol = 'XAU/USD',
   } = opts;
+
+  const symMeta = getSymbolMeta(symbol);
+  const samplePrices =
+    symbol === 'EUR/USD'
+      ? { e: '1.09000', sl: '1.08850', tp1: '1.09200', tp2: '1.09400' }
+      : symbol === 'GBP/USD'
+      ? { e: '1.29500', sl: '1.29300', tp1: '1.29750', tp2: '1.30000' }
+      : symbol === 'BTC/USD'
+      ? { e: '95000.00', sl: '94750.00', tp1: '95350.00', tp2: '95700.00' }
+      : { e: '3580.00', sl: '3575.00', tp1: '3585.00', tp2: '3590.00' };
 
   const isLightweightModel = /liquid\/lfm/i.test(modelName);
   const activePrompt = isLightweightModel && compactPromptText ? compactPromptText : promptText;
@@ -663,9 +679,9 @@ Rules:
 - signal must be "BUY", "SELL", or "HOLD".
 - marketBias must be "BULLISH", "BEARISH", or "RANGING".
 - positionDecision must be "NONE", "KEEP", "CLOSE_BUY", "CLOSE_SELL", or "CLOSE_ALL".
-- Use real numbers from the market data above for entryPrice, stopLoss, takeProfit1, takeProfit2.
+- Use real numbers from the ${symbol} market data above for entryPrice, stopLoss, takeProfit1, takeProfit2.
 - Output ONLY 1 valid JSON object matching this exact schema (no markdown, no extra text):
-{"signal":"HOLD","confidence":60,"marketBias":"RANGING","positionDecision":"NONE","positionReason":"Tidak ada posisi terbuka.","winProbability":70,"reversalConfidence":20,"highProbTp":0,"highProbTpConfidence":88,"postTpEvaluation":"NONE","postTpReason":"none","keyLevelsSummary":"S1/R1 summary","priceActionSignal":"NETRAL — Konsolidasi candle tanpa Pin Bar / Engulfing / Breakout bersih","harmonicPattern":"Tidak ada pola Harmonic X-A-B-C-D valid saat ini","lstmProbability":{"upPct":33,"downPct":33,"holdPct":34,"horizonMinutes":15,"rationale":"Struktur sideways, probabilitas seimbang."},"judgeVerdict":"VONIS","indicatorWeighting":"S/R + price action","entryPrice":3580.00,"stopLoss":3575.00,"takeProfit1":3585.00,"takeProfit2":3590.00,"riskRewardRatio":"1:1.5","setupPattern":"Consolidation","summary":"Ringkasan singkat kondisi XAU/USD saat ini.","keyFactors":["S/R utama","Struktur M5"],"invalidatedIf":"Break S1/R1"}`
+{"signal":"HOLD","confidence":60,"marketBias":"RANGING","positionDecision":"NONE","positionReason":"Tidak ada posisi terbuka.","winProbability":70,"reversalConfidence":20,"highProbTp":0,"highProbTpConfidence":88,"postTpEvaluation":"NONE","postTpReason":"none","keyLevelsSummary":"S1/R1 summary","priceActionSignal":"NETRAL — Konsolidasi candle tanpa Pin Bar / Engulfing / Breakout bersih","harmonicPattern":"Tidak ada pola Harmonic X-A-B-C-D valid saat ini","lstmProbability":{"upPct":33,"downPct":33,"holdPct":34,"horizonMinutes":15,"rationale":"Struktur sideways, probabilitas seimbang."},"judgeVerdict":"VONIS","indicatorWeighting":"S/R + price action","entryPrice":${samplePrices.e},"stopLoss":${samplePrices.sl},"takeProfit1":${samplePrices.tp1},"takeProfit2":${samplePrices.tp2},"riskRewardRatio":"1:1.5","setupPattern":"Consolidation","summary":"Ringkasan singkat kondisi ${symbol} saat ini.","keyFactors":["S/R utama","Struktur ${symMeta.shortName}"],"invalidatedIf":"Break S1/R1"}`
     : `
 
 ATURAN OUTPUT JSON (OPENROUTER ${modelName.toUpperCase()}):
@@ -728,7 +744,7 @@ ATURAN OUTPUT JSON (OPENROUTER ${modelName.toUpperCase()}):
     const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
     try {
       const systemText = isLightweightModel
-        ? 'You are an expert XAU/USD M5 scalping analyst. Output ONLY 1 valid JSON object.'
+        ? `You are an expert ${symbol} scalping analyst. Output ONLY 1 valid JSON object.`
         : systemInstruction;
       const promptWithContract = useSystemRole
         ? `${activePrompt}${jsonContract}`
@@ -758,7 +774,7 @@ ATURAN OUTPUT JSON (OPENROUTER ${modelName.toUpperCase()}):
           Authorization: `Bearer ${cfg.apiKey}`,
           'Content-Type': 'application/json',
           'HTTP-Referer': 'https://aurumea.local',
-          'X-Title': 'AurumEA XAUUSD M5',
+          'X-Title': `AurumEA ${symMeta.mt5Symbol}`,
         },
         body: JSON.stringify({
           model: modelName,
@@ -945,6 +961,9 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
     hasRecentClosedContext,
   } = opts;
   const activeDecisionModel = modelOverride || cfg.model;
+  const activeSymbol = normalizeTradingSymbol(snapshot.quote.symbol);
+  const symMeta = getSymbolMeta(activeSymbol);
+  const dec = symMeta.decimals;
   let useNoulFormat = /^respan\//i.test(activeDecisionModel);
 
   const buildQuestions = (asNoul: boolean): Record<string, unknown> => {
@@ -953,7 +972,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
         buy_signal: {
           type: 'noul',
           instructions:
-            'Should the trader open a BUY (LONG) XAU/USD position right now based on S/R structure, price action, and order flow?',
+            `Should the trader open a BUY (LONG) ${activeSymbol} position right now based on S/R structure, price action, and order flow?`,
           criteria: {
             true: 'Bullish structure, strong Support bounce/rejection, or valid upside breakout with sufficient room before nearest Resistance and >=90% scalp winrate quality.',
             false: 'Bearish, choppy, ranging, or blocked by nearby resistance.',
@@ -962,7 +981,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
         sell_signal: {
           type: 'noul',
           instructions:
-            'Should the trader open a SELL (SHORT) XAU/USD position right now based on S/R structure, price action, and order flow?',
+            `Should the trader open a SELL (SHORT) ${activeSymbol} position right now based on S/R structure, price action, and order flow?`,
           criteria: {
             true: 'Bearish structure, strong Resistance rejection, or valid downside breakdown with sufficient room before nearest Support and >=90% scalp winrate quality.',
             false: 'Bullish, choppy, ranging, or blocked by nearby support.',
@@ -971,7 +990,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
         hold_wait: {
           type: 'noul',
           instructions:
-            'Should the trader HOLD / WAIT and avoid opening a new XAU/USD trade right now?',
+            `Should the trader HOLD / WAIT and avoid opening a new ${activeSymbol} trade right now?`,
           criteria: {
             true: 'Market is choppy or ranging, pinned near S/R barrier without confirmation, post-TP pullback/exhaustion, or unfavorable risk-reward.',
             false: 'Clean high-conviction directional BUY or SELL setup is confirmed.',
@@ -979,7 +998,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
         },
         bullish_bias: {
           type: 'noul',
-          instructions: 'Is the dominant structural market bias on the active XAU/USD timeframe BULLISH?',
+          instructions: `Is the dominant structural market bias on the active ${activeSymbol} timeframe BULLISH?`,
           criteria: {
             true: 'Higher highs and higher lows, bullish BOS, or demand absorption dominates.',
             false: 'Bearish structure or sideways ranging dominates.',
@@ -987,7 +1006,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
         },
         bearish_bias: {
           type: 'noul',
-          instructions: 'Is the dominant structural market bias on the active XAU/USD timeframe BEARISH?',
+          instructions: `Is the dominant structural market bias on the active ${activeSymbol} timeframe BEARISH?`,
           criteria: {
             true: 'Lower highs and lower lows, bearish BOS, or supply rejection dominates.',
             false: 'Bullish structure or sideways ranging dominates.',
@@ -1007,7 +1026,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
         signal: {
           type: 'choice',
           instructions:
-            'Autonomous XAU/USD trading decision based primarily on Support/Resistance map, market structure, chart/candlestick patterns, order flow, and price action (indicators are optional only). Do not blindly reverse immediately after a TP hit.',
+            `Autonomous ${activeSymbol} trading decision based primarily on Support/Resistance map, market structure, chart/candlestick patterns, order flow, and price action (indicators are optional only). Do not blindly reverse immediately after a TP hit.`,
           criteria: {
             BUY: 'Bullish structure, strong Support bounce/rejection, or valid upside breakout with sufficient room before nearest Resistance.',
             SELL: 'Bearish structure, strong Resistance rejection, or valid downside breakdown with sufficient room before nearest Support.',
@@ -1016,7 +1035,7 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
         },
         market_bias: {
           type: 'choice',
-          instructions: 'Dominant structural market bias on the active XAU/USD timeframe.',
+          instructions: `Dominant structural market bias on the active ${activeSymbol} timeframe.`,
           criteria: {
             BULLISH: 'Higher highs and higher lows, bullish BOS, or demand absorption.',
             BEARISH: 'Lower highs and lower lows, bearish BOS, or supply rejection.',
@@ -1570,12 +1589,13 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
     }
   }
 
-  stopLoss = Number(stopLoss.toFixed(2));
-  takeProfit1 = Number(takeProfit1.toFixed(2));
-  takeProfit2 = Number(takeProfit2.toFixed(2));
+  stopLoss = Number(stopLoss.toFixed(dec));
+  takeProfit1 = Number(takeProfit1.toFixed(dec));
+  takeProfit2 = Number(takeProfit2.toFixed(dec));
 
-  const slDist = Math.max(0.1, Math.abs(entryPrice - stopLoss));
-  const tpDist = Math.max(0.1, Math.abs(takeProfit1 - entryPrice));
+  const minStep = Math.max(symMeta.minMove * 5, symMeta.minSlDistance * 0.4);
+  const slDist = Math.max(minStep, Math.abs(entryPrice - stopLoss));
+  const tpDist = Math.max(minStep, Math.abs(takeProfit1 - entryPrice));
   const rr = `1:${(tpDist / slDist).toFixed(1)}`;
 
   const keyLevelsSummary = `${chartStructure.marketStructure} (${chartStructure.structureSummary}) | ${chartStructure.pricePositionNote}${
@@ -1587,15 +1607,15 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
     chartStructure.chartPatterns[0] ||
     `Decisions ${bias.choice} (${sig.choice})`;
 
-  const highProbTpDist = Math.max(0.45, Math.min(atrValue * 0.65, tpDist * 0.65));
+  const highProbTpDist = Math.max(symMeta.minSlDistance, Math.min(atrValue * 0.65, tpDist * 0.65));
   const rawHighProbTp =
     sig.choice === 'SELL'
-      ? Number((snapshot.quote.bid - highProbTpDist).toFixed(2))
-      : Number((snapshot.quote.ask + highProbTpDist).toFixed(2));
+      ? Number((snapshot.quote.bid - highProbTpDist).toFixed(dec))
+      : Number((snapshot.quote.ask + highProbTpDist).toFixed(dec));
 
   const hp = chartStructure.harmonicPattern;
   const harmonicDesc = hp
-    ? `${hp.direction} ${hp.name} (${hp.status}) PRZ ${hp.przLow.toFixed(2)}-${hp.przHigh.toFixed(2)} | ${hp.ratiosSummary} | TP1=${hp.target1.toFixed(2)}`
+    ? `${hp.direction} ${hp.name} (${hp.status}) PRZ ${hp.przLow.toFixed(dec)}-${hp.przHigh.toFixed(dec)} | ${hp.ratiosSummary} | TP1=${hp.target1.toFixed(dec)}`
     : 'Belum ada pola Harmonic X-A-B-C-D yang mencapai zona PRZ valid saat ini.';
 
   const buyMatch = sig.probsText.match(/BUY\s+(\d+)%/i);
@@ -1653,9 +1673,9 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
     ],
     invalidatedIf:
       sig.choice === 'BUY'
-        ? `Break dan close kuat di bawah support ${stopLoss.toFixed(2)}`
+        ? `Break dan close kuat di bawah support ${stopLoss.toFixed(dec)}`
         : sig.choice === 'SELL'
-        ? `Break dan close kuat di atas resistance ${stopLoss.toFixed(2)}`
+        ? `Break dan close kuat di atas resistance ${stopLoss.toFixed(dec)}`
         : 'Terbentuk breakout/breakdown terkonfirmasi melewati S1/R1 terdekat',
   };
 
@@ -1668,11 +1688,17 @@ async function generateAnalysisViaOpenRouterDecisions(opts: {
 
 // ---------- Deep Learning & Quantitative Sequence Pattern Engine (220 Candles) ----------
 
-function buildDeepLearningTelemetry(candles: Candle[], atr: number): string {
+function buildDeepLearningTelemetry(
+  candles: Candle[],
+  atr: number,
+  symbol: TradingSymbol = 'XAU/USD'
+): string {
   if (candles.length < 30) {
     return 'Data candle belum mencukupi untuk ekstraksi fitur Deep Learning.';
   }
-  const safeAtr = Math.max(0.2, atr);
+  const symMeta = getSymbolMeta(symbol);
+  const dec = symMeta.decimals;
+  const safeAtr = Math.max(symMeta.minSlDistance * 0.5, atr);
   const n = candles.length;
   const last = candles[n - 1];
 
@@ -1680,7 +1706,7 @@ function buildDeepLearningTelemetry(candles: Candle[], atr: number): string {
     const idx = Math.max(0, n - 1 - bars);
     const diff = last.close - candles[idx].close;
     const z = diff / safeAtr;
-    return `${diff >= 0 ? '+' : ''}${diff.toFixed(2)} USD (Z=${z >= 0 ? '+' : ''}${z.toFixed(2)} ATR)`;
+    return `${diff >= 0 ? '+' : ''}${diff.toFixed(dec)} (Z=${z >= 0 ? '+' : ''}${z.toFixed(2)} ATR)`;
   };
 
   // Kaufman Efficiency Ratio (14 & 30 bars): |NetMove| / Sum(|StepMoves|)
@@ -1756,10 +1782,11 @@ function buildDeepLearningTelemetry(candles: Candle[], atr: number): string {
   const buyPressurePct = totalFlow > 0 ? (bullFlow / totalFlow) * 100 : 50;
 
   // k-NN 5-Candle Feature Sequence Matching across available history (cosine similarity)
+  const minRangeFloor = Math.max(symMeta.minMove * 5, symMeta.defaultAtr * 0.02);
   const buildWindowVec = (win: Candle[]): number[] => {
     const vec: number[] = [];
     for (const c of win) {
-      const range = Math.max(0.05, c.high - c.low);
+      const range = Math.max(minRangeFloor, c.high - c.low);
       const body = (c.close - c.open) / safeAtr;
       const uw = (c.high - Math.max(c.open, c.close)) / range;
       const lw = (Math.min(c.open, c.close) - c.low) / range;
@@ -1817,17 +1844,17 @@ function buildDeepLearningTelemetry(candles: Candle[], atr: number): string {
   const quantLstmHold = Math.max(0, 100 - quantLstmUp - quantLstmDown);
 
   return [
-    `- Vektor Momentum Multi-Horizon: 1-Bar=${ret(1)} | 3-Bar=${ret(3)} | 6-Bar=${ret(6)} | 12-Bar=${ret(12)} | 24-Bar=${ret(24)}`,
-    `- Regresi Linear & Akselerasi: Slope10=${slope10 >= 0 ? '+' : ''}${slope10.toFixed(2)} USD/bar | Slope20=${slope20 >= 0 ? '+' : ''}${slope20.toFixed(2)} | Akselerasi 5-bar=${accel >= 0 ? '+' : ''}${accel.toFixed(2)}`,
+    `- Vektor Momentum Multi-Horizon (${symbol}): 1-Bar=${ret(1)} | 3-Bar=${ret(3)} | 6-Bar=${ret(6)} | 12-Bar=${ret(12)} | 24-Bar=${ret(24)}`,
+    `- Regresi Linear & Akselerasi: Slope10=${slope10 >= 0 ? '+' : ''}${slope10.toFixed(dec)}/bar | Slope20=${slope20 >= 0 ? '+' : ''}${slope20.toFixed(dec)} | Akselerasi 5-bar=${accel >= 0 ? '+' : ''}${accel.toFixed(dec)}`,
     `- Efisiensi Arah (Kaufman ER): ER14=${er14.toFixed(2)} | ER30=${er30.toFixed(2)} -> Rezim: ${erRegime}`,
     `- Rezim Volatilitas: Rasio ATR14/Mean50 = ${volRatio.toFixed(2)}x -> ${volRegime}`,
-    `- Order Flow & Likuiditas (10 Candle): Dominasi Buyer Body=${buyPressurePct.toFixed(1)}% vs Seller=${(100 - buyPressurePct).toFixed(1)}% | Total Ekor Atas=${upperWickSum.toFixed(2)} USD vs Ekor Bawah=${lowerWickSum.toFixed(2)} USD`,
-    `- Memori Pola Sekuensial k-NN (${n} Candle): Top-5 pola 5-candle termirip (kemiripan rata-rata ${avgSim.toFixed(1)}%) menghasilkan ${bullFwd3}/5 lanjutan BULLISH dalam 3 candle berikutnya dengan rata-rata perubahan ${avgFwd3 >= 0 ? '+' : ''}${avgFwd3.toFixed(2)} USD.`,
-    `- Baseline Sekuens Bi-Directional Kuantitatif (Bahan Kalibrasi LSTM AI): P(Naik)=${quantLstmUp}% | P(Turun)=${quantLstmDown}% | P(Sideways/Hold)=${quantLstmHold}% (wajib dihitung ulang secara mandiri oleh AI sebagai trader profesional bersama struktur MTF, Harmonic PRZ & DXY).`,
+    `- Order Flow & Likuiditas (10 Candle): Dominasi Buyer Body=${buyPressurePct.toFixed(1)}% vs Seller=${(100 - buyPressurePct).toFixed(1)}% | Total Ekor Atas=${upperWickSum.toFixed(dec)} vs Ekor Bawah=${lowerWickSum.toFixed(dec)}`,
+    `- Memori Pola Sekuensial k-NN (${n} Candle): Top-5 pola 5-candle termirip (kemiripan rata-rata ${avgSim.toFixed(1)}%) menghasilkan ${bullFwd3}/5 lanjutan BULLISH dalam 3 candle berikutnya dengan rata-rata perubahan ${avgFwd3 >= 0 ? '+' : ''}${avgFwd3.toFixed(dec)}.`,
+    `- Baseline Sekuens Bi-Directional Kuantitatif (Bahan Kalibrasi LSTM AI): P(Naik)=${quantLstmUp}% | P(Turun)=${quantLstmDown}% | P(Sideways/Hold)=${quantLstmHold}% (wajib dihitung ulang secara mandiri oleh AI sebagai trader profesional bersama struktur MTF, Harmonic PRZ & Makro).`,
   ].join('\n');
 }
 
-// ---------- Live XAU/USD Multi-Timeframe Market Data Engine ----------
+// ---------- Live Multi-Pair (XAU/USD, GBP/USD, EUR/USD, BTC/USD) Market Data Engine ----------
 
 interface RawFeedResult {
   candles: Candle[];
@@ -1842,8 +1869,8 @@ interface RawFeedResult {
   marketStatus: 'LIVE' | 'DELAYED';
 }
 
-const spotCacheByTf = new Map<ChartTimeframe, { snapshot: MarketSnapshot; fetchedAt: number }>();
-const activeSpotFetchByTf = new Map<ChartTimeframe, Promise<MarketSnapshot>>();
+const spotCacheByTf = new Map<string, { snapshot: MarketSnapshot; fetchedAt: number }>();
+const activeSpotFetchByTf = new Map<string, Promise<MarketSnapshot>>();
 
 function alignToM5(unixSeconds: number): number {
   return Math.floor(unixSeconds / 300) * 300;
@@ -1886,6 +1913,7 @@ function resampleCandlesToTimeframe(candles: Candle[], timeframe: ChartTimeframe
 
 interface TvStreamState {
   streamKey: string;
+  symbol: TradingSymbol;
   brokerId: BrokerFeedId;
   timeframe: ChartTimeframe;
   brokerName: string;
@@ -1914,14 +1942,21 @@ function packTvMessage(method: string, params: unknown[]): string {
   return `~m~${json.length}~m~${json}`;
 }
 
-function getOrStartTvStream(brokerId: BrokerFeedId, timeframe: ChartTimeframe): TvStreamState {
+function getOrStartTvStream(
+  brokerId: BrokerFeedId,
+  timeframe: ChartTimeframe,
+  symbol: TradingSymbol = 'XAU/USD'
+): TvStreamState {
   const meta = BROKER_FEEDS.find((b) => b.id === brokerId);
-  if (!meta || !meta.tvSymbol) {
-    throw new Error(`Broker ${brokerId} tidak memiliki simbol TradingView.`);
+  const tvSym = getTvSymbolForBrokerAndPair(brokerId, symbol);
+  if (!meta || !tvSym) {
+    throw new Error(`Broker ${brokerId} tidak memiliki simbol TradingView untuk ${symbol}.`);
   }
 
+  const symMeta = getSymbolMeta(symbol);
+  const dec = symMeta.decimals;
   const tfMeta = TIMEFRAME_META[timeframe];
-  const streamKey = `${brokerId}:${timeframe}`;
+  const streamKey = `${symbol}:${brokerId}:${timeframe}`;
   const existing = tvStreams.get(streamKey);
   if (existing && !existing.destroyed && existing.ws && existing.ws.readyState !== WebSocket.CLOSED) {
     existing.lastAccessedAt = Date.now();
@@ -1930,10 +1965,11 @@ function getOrStartTvStream(brokerId: BrokerFeedId, timeframe: ChartTimeframe): 
 
   const state: TvStreamState = {
     streamKey,
+    symbol,
     brokerId,
     timeframe,
     brokerName: meta.name,
-    tvSymbol: meta.tvSymbol,
+    tvSymbol: tvSym,
     ws: null,
     candlesByIndex: new Map<number, Candle>(),
     lp: null,
@@ -1957,7 +1993,7 @@ function getOrStartTvStream(brokerId: BrokerFeedId, timeframe: ChartTimeframe): 
     const timeout = setTimeout(() => {
       if (!settled) {
         settled = true;
-        reject(new Error(`Timeout menyambung ke feed broker ${meta.name} (${meta.tvSymbol}).`));
+        reject(new Error(`Timeout menyambung ke feed broker ${meta.name} (${tvSym}).`));
       }
     }, 7000);
 
@@ -1968,8 +2004,9 @@ function getOrStartTvStream(brokerId: BrokerFeedId, timeframe: ChartTimeframe): 
     );
     state.ws = ws;
 
-    const chartSession = `cs_${brokerId}_${timeframe}_${Math.random().toString(36).slice(2, 7)}`;
-    const quoteSession = `qs_${brokerId}_${timeframe}_${Math.random().toString(36).slice(2, 7)}`;
+    const cleanSymId = symMeta.mt5Symbol;
+    const chartSession = `cs_${cleanSymId}_${brokerId}_${timeframe}_${Math.random().toString(36).slice(2, 7)}`;
+    const quoteSession = `qs_${cleanSymId}_${brokerId}_${timeframe}_${Math.random().toString(36).slice(2, 7)}`;
 
     ws.onopen = () => {
       ws.send(packTvMessage('set_auth_token', ['unauthorized_user_token']));
@@ -1987,13 +2024,13 @@ function getOrStartTvStream(brokerId: BrokerFeedId, timeframe: ChartTimeframe): 
           'prev_close_price',
         ])
       );
-      ws.send(packTvMessage('quote_add_symbols', [quoteSession, meta.tvSymbol!]));
+      ws.send(packTvMessage('quote_add_symbols', [quoteSession, tvSym]));
       ws.send(packTvMessage('chart_create_session', [chartSession, '']));
       ws.send(
         packTvMessage('resolve_symbol', [
           chartSession,
           'sds_sym_1',
-          '=' + JSON.stringify({ symbol: meta.tvSymbol, adjustment: 'splits' }),
+          '=' + JSON.stringify({ symbol: tvSym, adjustment: 'splits' }),
         ])
       );
       ws.send(
@@ -2025,10 +2062,10 @@ function getOrStartTvStream(brokerId: BrokerFeedId, timeframe: ChartTimeframe): 
         }
         state.candlesByIndex.set(bar.i, {
           time: alignToTimeframe(Math.floor(rawTime), tfMeta.seconds),
-          open: Number(o.toFixed(2)),
-          high: Number(h.toFixed(2)),
-          low: Number(l.toFixed(2)),
-          close: Number(c.toFixed(2)),
+          open: Number(o.toFixed(dec)),
+          high: Number(h.toFixed(dec)),
+          low: Number(l.toFixed(dec)),
+          close: Number(c.toFixed(dec)),
           volume: Number(vol ?? 100),
         });
       }
@@ -2074,19 +2111,19 @@ function getOrStartTvStream(brokerId: BrokerFeedId, timeframe: ChartTimeframe): 
           };
           if (q?.s === 'ok' && q.v) {
             state.lastQuoteTickAt = Date.now();
-            if (typeof q.v.lp === 'number' && q.v.lp > 0) state.lp = Number(q.v.lp.toFixed(2));
-            if (typeof q.v.bid === 'number' && q.v.bid > 0) state.bid = Number(q.v.bid.toFixed(2));
-            if (typeof q.v.ask === 'number' && q.v.ask > 0) state.ask = Number(q.v.ask.toFixed(2));
-            if (typeof q.v.ch === 'number') state.ch = Number(q.v.ch.toFixed(2));
+            if (typeof q.v.lp === 'number' && q.v.lp > 0) state.lp = Number(q.v.lp.toFixed(dec));
+            if (typeof q.v.bid === 'number' && q.v.bid > 0) state.bid = Number(q.v.bid.toFixed(dec));
+            if (typeof q.v.ask === 'number' && q.v.ask > 0) state.ask = Number(q.v.ask.toFixed(dec));
+            if (typeof q.v.ch === 'number') state.ch = Number(q.v.ch.toFixed(dec));
             if (typeof q.v.chp === 'number') state.chp = Number(q.v.chp.toFixed(2));
             if (typeof q.v.high_price === 'number' && q.v.high_price > 0) {
-              state.high24h = Number(q.v.high_price.toFixed(2));
+              state.high24h = Number(q.v.high_price.toFixed(dec));
             }
             if (typeof q.v.low_price === 'number' && q.v.low_price > 0) {
-              state.low24h = Number(q.v.low_price.toFixed(2));
+              state.low24h = Number(q.v.low_price.toFixed(dec));
             }
             if (typeof q.v.prev_close_price === 'number' && q.v.prev_close_price > 0) {
-              state.prevClose = Number(q.v.prev_close_price.toFixed(2));
+              state.prevClose = Number(q.v.prev_close_price.toFixed(dec));
             }
           }
         } else if (msg.m === 'series_completed') {
@@ -2094,14 +2131,13 @@ function getOrStartTvStream(brokerId: BrokerFeedId, timeframe: ChartTimeframe): 
           if (!settled) {
             settled = true;
             clearTimeout(timeout);
-            // Give quote ticks ~250ms to arrive if bid/ask weren't in first frame
             setTimeout(() => resolve(), 250);
           }
         } else if (msg.m === 'symbol_error' || msg.m === 'series_error') {
           if (!settled) {
             settled = true;
             clearTimeout(timeout);
-            reject(new Error(`Simbol broker ${meta.tvSymbol} gagal dimuat.`));
+            reject(new Error(`Simbol broker ${tvSym} gagal dimuat.`));
           }
         }
       }
@@ -2111,7 +2147,7 @@ function getOrStartTvStream(brokerId: BrokerFeedId, timeframe: ChartTimeframe): 
       if (!settled) {
         settled = true;
         clearTimeout(timeout);
-        reject(new Error(`Koneksi WebSocket ke ${meta.name} terputus.`));
+        reject(new Error(`Koneksi WebSocket ke ${meta.name} (${tvSym}) terputus.`));
       }
     };
 
@@ -2123,7 +2159,7 @@ function getOrStartTvStream(brokerId: BrokerFeedId, timeframe: ChartTimeframe): 
       if (!settled) {
         settled = true;
         clearTimeout(timeout);
-        reject(new Error(`Stream broker ${meta.name} tertutup sebelum data siap.`));
+        reject(new Error(`Stream broker ${meta.name} (${tvSym}) tertutup sebelum data siap.`));
       }
     };
   });
@@ -2149,15 +2185,17 @@ setInterval(() => {
 
 async function getTradingViewBrokerSnapshot(
   brokerId: BrokerFeedId,
-  timeframe: ChartTimeframe
+  timeframe: ChartTimeframe,
+  symbol: TradingSymbol = 'XAU/USD'
 ): Promise<MarketSnapshot> {
   const tfMeta = TIMEFRAME_META[timeframe];
-  const state = getOrStartTvStream(brokerId, timeframe);
+  const symMeta = getSymbolMeta(symbol);
+  const dec = symMeta.decimals;
+  const state = getOrStartTvStream(brokerId, timeframe, symbol);
   if (!state.seriesCompleted && state.connectingPromise) {
     await state.connectingPromise;
   }
 
-  // Deduplicate by aligned timeframe timestamp keeping the latest bar
   const dedup = new Map<number, Candle>();
   const ordered = Array.from(state.candlesByIndex.entries())
     .sort((a, b) => a[0] - b[0])
@@ -2170,13 +2208,14 @@ async function getTradingViewBrokerSnapshot(
     .slice(-220);
 
   if (candles.length < 20) {
-    throw new Error(`Data candle ${timeframe} dari ${state.brokerName} belum mencukupi.`);
+    throw new Error(`Data candle ${symbol} ${timeframe} dari ${state.brokerName} belum mencukupi.`);
   }
 
   const last = candles[candles.length - 1];
   const rawBid = state.bid;
   const rawAsk = state.ask;
   const rawLp = state.lp ?? last.close;
+  const halfSpread = symMeta.spreadFallback / 2;
 
   let bid: number;
   let ask: number;
@@ -2185,11 +2224,11 @@ async function getTradingViewBrokerSnapshot(
   if (rawBid && rawAsk && rawAsk >= rawBid) {
     bid = rawBid;
     ask = rawAsk;
-    mid = Number(((bid + ask) / 2).toFixed(2));
+    mid = Number(((bid + ask) / 2).toFixed(dec));
   } else {
-    mid = Number(rawLp.toFixed(2));
-    bid = Number((mid - 0.08).toFixed(2));
-    ask = Number((mid + 0.08).toFixed(2));
+    mid = Number(rawLp.toFixed(dec));
+    bid = Number((mid - halfSpread).toFixed(dec));
+    ask = Number((mid + halfSpread).toFixed(dec));
   }
 
   const nowSec = Math.floor(Date.now() / 1000);
@@ -2207,7 +2246,7 @@ async function getTradingViewBrokerSnapshot(
 
   const prevClose = state.prevClose ?? candles[0].open;
   const change24h =
-    state.ch !== null ? state.ch : Number((mid - prevClose).toFixed(2));
+    state.ch !== null ? state.ch : Number((mid - prevClose).toFixed(dec));
   const changePercent24h =
     state.chp !== null
       ? state.chp
@@ -2218,24 +2257,24 @@ async function getTradingViewBrokerSnapshot(
   const high24h =
     state.high24h !== null
       ? Math.max(state.high24h, ...candles.map((c) => c.high))
-      : Number(Math.max(...candles.map((c) => c.high)).toFixed(2));
+      : Number(Math.max(...candles.map((c) => c.high)).toFixed(dec));
   const low24h =
     state.low24h !== null
       ? Math.min(state.low24h, ...candles.map((c) => c.low))
-      : Number(Math.min(...candles.map((c) => c.low)).toFixed(2));
+      : Number(Math.min(...candles.map((c) => c.low)).toFixed(dec));
 
-  const pack = buildIndicatorPack(candles);
+  const pack = buildIndicatorPack(candles, symbol);
   const quote: MarketQuote = {
-    symbol: 'XAU/USD',
+    symbol,
     timeframe,
     bid,
     ask,
     mid,
-    spread: Number(Math.max(0, ask - bid).toFixed(2)),
+    spread: Number(Math.max(0, ask - bid).toFixed(dec)),
     change24h,
     changePercent24h,
-    high24h: Number(high24h.toFixed(2)),
-    low24h: Number(low24h.toFixed(2)),
+    high24h: Number(high24h.toFixed(dec)),
+    low24h: Number(low24h.toFixed(dec)),
     source: `${state.brokerName} (${state.tvSymbol})`,
     brokerId,
     brokerSymbol: state.tvSymbol,
@@ -2256,17 +2295,27 @@ async function getTradingViewBrokerSnapshot(
   };
 }
 
-async function fetchYahooXau(
-  symbol: 'XAUUSD=X' | 'GC=F',
-  timeframe: ChartTimeframe
+async function fetchYahooMarket(
+  yahooSym: string,
+  timeframe: ChartTimeframe,
+  tradingSymbol: TradingSymbol
 ): Promise<RawFeedResult | null> {
   const tfMeta = TIMEFRAME_META[timeframe];
-  const range = timeframe === 'H1' ? '1mo' : timeframe === 'M30' || timeframe === 'M15' ? '5d' : '2d';
+  const symMeta = getSymbolMeta(tradingSymbol);
+  const dec = symMeta.decimals;
+  const range =
+    timeframe === 'H1'
+      ? '1mo'
+      : timeframe === 'M30' || timeframe === 'M15'
+      ? '5d'
+      : timeframe === 'M1'
+      ? '1d'
+      : '2d';
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5000);
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-      symbol
+      yahooSym
     )}?interval=${tfMeta.yahooInterval}&range=${range}`;
     const res = await fetch(url, {
       signal: controller.signal,
@@ -2316,10 +2365,10 @@ async function fetchYahooXau(
       if (o == null || h == null || l == null || c == null) continue;
       candles.push({
         time: alignToTimeframe(ts[i], tfMeta.seconds),
-        open: Number(o.toFixed(2)),
-        high: Number(h.toFixed(2)),
-        low: Number(l.toFixed(2)),
-        close: Number(c.toFixed(2)),
+        open: Number(o.toFixed(dec)),
+        high: Number(h.toFixed(dec)),
+        low: Number(l.toFixed(dec)),
+        close: Number(c.toFixed(dec)),
         volume: Number(v || 100),
       });
     }
@@ -2332,32 +2381,36 @@ async function fetchYahooXau(
 
     const last = sorted[sorted.length - 1];
     const metaPrice = result.meta?.regularMarketPrice;
-    const mid = Number((metaPrice && metaPrice > 500 ? metaPrice : last.close).toFixed(2));
+    const minValidPrice =
+      tradingSymbol === 'XAU/USD' ? 500 : tradingSymbol === 'BTC/USD' ? 1000 : 0.2;
+    const mid = Number(
+      (metaPrice && metaPrice > minValidPrice ? metaPrice : last.close).toFixed(dec)
+    );
     last.close = mid;
     if (mid > last.high) last.high = mid;
     if (mid < last.low) last.low = mid;
 
-    const halfSpread = 0.14;
-    const bid = Number((mid - halfSpread).toFixed(2));
-    const ask = Number((mid + halfSpread).toFixed(2));
+    const halfSpread = symMeta.spreadFallback / 2;
+    const bid = Number((mid - halfSpread).toFixed(dec));
+    const ask = Number((mid + halfSpread).toFixed(dec));
 
     const barsPer24h = Math.max(1, Math.round(86400 / tfMeta.seconds));
     const prevClose =
       result.meta?.chartPreviousClose ??
       result.meta?.previousClose ??
       sorted[Math.max(0, sorted.length - barsPer24h)].open;
-    const change24h = Number((mid - prevClose).toFixed(2));
+    const change24h = Number((mid - prevClose).toFixed(dec));
     const changePercent24h = prevClose > 0 ? Number(((change24h / prevClose) * 100).toFixed(2)) : 0;
 
     const recent24h = sorted.slice(-barsPer24h);
     const high24h = Number(
-      Math.max(result.meta?.regularMarketDayHigh ?? 0, ...recent24h.map((c) => c.high)).toFixed(2)
+      Math.max(result.meta?.regularMarketDayHigh ?? 0, ...recent24h.map((c) => c.high)).toFixed(dec)
     );
     const low24h = Number(
       Math.min(
-        result.meta?.regularMarketDayLow ?? 999999,
+        result.meta?.regularMarketDayLow ?? 9999999,
         ...recent24h.map((c) => c.low)
-      ).toFixed(2)
+      ).toFixed(dec)
     );
 
     const ageSec = Math.floor(Date.now() / 1000) - last.time;
@@ -2372,7 +2425,10 @@ async function fetchYahooXau(
       low24h,
       change24h,
       changePercent24h,
-      source: symbol === 'XAUUSD=X' ? 'Spot XAU/USD (Yahoo Feed)' : 'COMEX Gold GC=F',
+      source:
+        yahooSym === 'GC=F'
+          ? 'COMEX Gold GC=F'
+          : `Spot ${tradingSymbol} (Yahoo Feed)`,
       marketStatus: isFresh ? 'LIVE' : 'DELAYED',
     };
   } catch {
@@ -2382,17 +2438,24 @@ async function fetchYahooXau(
   }
 }
 
-async function fetchBinancePaxg(timeframe: ChartTimeframe): Promise<RawFeedResult | null> {
+async function fetchBinanceMarket(
+  binanceSym: string,
+  timeframe: ChartTimeframe,
+  tradingSymbol: TradingSymbol
+): Promise<RawFeedResult | null> {
   const tfMeta = TIMEFRAME_META[timeframe];
+  const symMeta = getSymbolMeta(tradingSymbol);
+  const dec = symMeta.decimals;
+  const halfSpread = symMeta.spreadFallback / 2;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5000);
   try {
     const [klineRes, tickerRes] = await Promise.all([
       fetch(
-        `https://data-api.binance.vision/api/v3/klines?symbol=PAXGUSDT&interval=${tfMeta.binanceInterval}&limit=240`,
+        `https://data-api.binance.vision/api/v3/klines?symbol=${encodeURIComponent(binanceSym)}&interval=${tfMeta.binanceInterval}&limit=240`,
         { signal: controller.signal }
       ),
-      fetch('https://data-api.binance.vision/api/v3/ticker/24hr?symbol=PAXGUSDT', {
+      fetch(`https://data-api.binance.vision/api/v3/ticker/24hr?symbol=${encodeURIComponent(binanceSym)}`, {
         signal: controller.signal,
       }),
     ]);
@@ -2405,16 +2468,16 @@ async function fetchBinancePaxg(timeframe: ChartTimeframe): Promise<RawFeedResul
 
     const candles: Candle[] = rawKlines.map((k) => ({
       time: alignToTimeframe(Math.floor(k[0] / 1000), tfMeta.seconds),
-      open: Number(Number(k[1]).toFixed(2)),
-      high: Number(Number(k[2]).toFixed(2)),
-      low: Number(Number(k[3]).toFixed(2)),
-      close: Number(Number(k[4]).toFixed(2)),
+      open: Number(Number(k[1]).toFixed(dec)),
+      high: Number(Number(k[2]).toFixed(dec)),
+      low: Number(Number(k[3]).toFixed(dec)),
+      close: Number(Number(k[4]).toFixed(dec)),
       volume: Number(Number(k[5]).toFixed(2)),
     }));
 
     const last = candles[candles.length - 1];
-    let bid = Number((last.close - 0.15).toFixed(2));
-    let ask = Number((last.close + 0.15).toFixed(2));
+    let bid = Number((last.close - halfSpread).toFixed(dec));
+    let ask = Number((last.close + halfSpread).toFixed(dec));
     let mid = last.close;
     let high24h = Math.max(...candles.map((c) => c.high));
     let low24h = Math.min(...candles.map((c) => c.low));
@@ -2435,17 +2498,17 @@ async function fetchBinancePaxg(timeframe: ChartTimeframe): Promise<RawFeedResul
       const a = Number(t.askPrice);
       const lp = Number(t.lastPrice);
       if (b > 0 && a > 0) {
-        bid = Number(b.toFixed(2));
-        ask = Number(a.toFixed(2));
-        mid = Number(((b + a) / 2).toFixed(2));
+        bid = Number(b.toFixed(dec));
+        ask = Number(a.toFixed(dec));
+        mid = Number(((b + a) / 2).toFixed(dec));
       } else if (lp > 0) {
-        mid = Number(lp.toFixed(2));
-        bid = Number((mid - 0.15).toFixed(2));
-        ask = Number((mid + 0.15).toFixed(2));
+        mid = Number(lp.toFixed(dec));
+        bid = Number((mid - halfSpread).toFixed(dec));
+        ask = Number((mid + halfSpread).toFixed(dec));
       }
-      if (Number(t.highPrice) > 0) high24h = Number(Number(t.highPrice).toFixed(2));
-      if (Number(t.lowPrice) > 0) low24h = Number(Number(t.lowPrice).toFixed(2));
-      if (t.priceChange !== undefined) change24h = Number(Number(t.priceChange).toFixed(2));
+      if (Number(t.highPrice) > 0) high24h = Number(Number(t.highPrice).toFixed(dec));
+      if (Number(t.lowPrice) > 0) low24h = Number(Number(t.lowPrice).toFixed(dec));
+      if (t.priceChange !== undefined) change24h = Number(Number(t.priceChange).toFixed(dec));
       if (t.priceChangePercent !== undefined)
         changePercent24h = Number(Number(t.priceChangePercent).toFixed(2));
     }
@@ -2463,7 +2526,7 @@ async function fetchBinancePaxg(timeframe: ChartTimeframe): Promise<RawFeedResul
       low24h,
       change24h,
       changePercent24h,
-      source: 'PAXG/USD 24/7 Spot Gold',
+      source: tradingSymbol === 'BTC/USD' ? 'Binance BTC/USDT 24/7' : 'PAXG/USD 24/7 Spot Gold',
       marketStatus: 'LIVE',
     };
   } catch {
@@ -2473,13 +2536,20 @@ async function fetchBinancePaxg(timeframe: ChartTimeframe): Promise<RawFeedResul
   }
 }
 
-async function fetchKrakenPaxg(timeframe: ChartTimeframe): Promise<RawFeedResult | null> {
+async function fetchKrakenMarket(
+  krakenSym: string,
+  timeframe: ChartTimeframe,
+  tradingSymbol: TradingSymbol
+): Promise<RawFeedResult | null> {
   const tfMeta = TIMEFRAME_META[timeframe];
+  const symMeta = getSymbolMeta(tradingSymbol);
+  const dec = symMeta.decimals;
+  const halfSpread = symMeta.spreadFallback / 2;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5000);
   try {
     const res = await fetch(
-      `https://api.kraken.com/0/public/OHLC?pair=PAXGUSD&interval=${tfMeta.krakenInterval}`,
+      `https://api.kraken.com/0/public/OHLC?pair=${encodeURIComponent(krakenSym)}&interval=${tfMeta.krakenInterval}`,
       { signal: controller.signal }
     );
     if (!res.ok) return null;
@@ -2493,30 +2563,30 @@ async function fetchKrakenPaxg(timeframe: ChartTimeframe): Promise<RawFeedResult
 
     const candles: Candle[] = rows.slice(-220).map((r) => ({
       time: alignToTimeframe(r[0], tfMeta.seconds),
-      open: Number(Number(r[1]).toFixed(2)),
-      high: Number(Number(r[2]).toFixed(2)),
-      low: Number(Number(r[3]).toFixed(2)),
-      close: Number(Number(r[4]).toFixed(2)),
+      open: Number(Number(r[1]).toFixed(dec)),
+      high: Number(Number(r[2]).toFixed(dec)),
+      low: Number(Number(r[3]).toFixed(dec)),
+      close: Number(Number(r[4]).toFixed(dec)),
       volume: Number(Number(r[6]).toFixed(2)),
     }));
 
     const last = candles[candles.length - 1];
     const first = candles[0];
     const mid = last.close;
-    const change24h = Number((mid - first.open).toFixed(2));
+    const change24h = Number((mid - first.open).toFixed(dec));
     const changePercent24h =
       first.open > 0 ? Number(((change24h / first.open) * 100).toFixed(2)) : 0;
 
     return {
       candles,
-      bid: Number((mid - 0.16).toFixed(2)),
-      ask: Number((mid + 0.16).toFixed(2)),
+      bid: Number((mid - halfSpread).toFixed(dec)),
+      ask: Number((mid + halfSpread).toFixed(dec)),
       mid,
-      high24h: Number(Math.max(...candles.map((c) => c.high)).toFixed(2)),
-      low24h: Number(Math.min(...candles.map((c) => c.low)).toFixed(2)),
+      high24h: Number(Math.max(...candles.map((c) => c.high)).toFixed(dec)),
+      low24h: Number(Math.min(...candles.map((c) => c.low)).toFixed(dec)),
       change24h,
       changePercent24h,
-      source: 'Kraken PAXG/USD Gold',
+      source: tradingSymbol === 'BTC/USD' ? 'Kraken BTC/USD' : 'Kraken PAXG/USD Gold',
       marketStatus: 'LIVE',
     };
   } catch {
@@ -2526,30 +2596,47 @@ async function fetchKrakenPaxg(timeframe: ChartTimeframe): Promise<RawFeedResult
   }
 }
 
-async function loadSpotFallbackFeed(timeframe: ChartTimeframe): Promise<MarketSnapshot> {
+async function loadSpotFallbackFeed(
+  timeframe: ChartTimeframe,
+  symbol: TradingSymbol = 'XAU/USD'
+): Promise<MarketSnapshot> {
   const tfMeta = TIMEFRAME_META[timeframe];
-  const spotXau = await fetchYahooXau('XAUUSD=X', timeframe);
+  const symMeta = getSymbolMeta(symbol);
+  const dec = symMeta.decimals;
   let chosen: RawFeedResult | null = null;
 
-  if (spotXau && spotXau.marketStatus === 'LIVE') {
-    chosen = spotXau;
-  } else {
-    const paxg = await fetchBinancePaxg(timeframe);
-    if (paxg) {
-      chosen = paxg;
+  if (symbol === 'BTC/USD') {
+    chosen =
+      (await fetchBinanceMarket('BTCUSDT', timeframe, symbol)) ||
+      (await fetchKrakenMarket('XBTUSD', timeframe, symbol)) ||
+      (await fetchYahooMarket('BTC-USD', timeframe, symbol));
+  } else if (symbol === 'GBP/USD' || symbol === 'EUR/USD') {
+    const yahooPrimary = await fetchYahooMarket(symMeta.yahooSymbols[0], timeframe, symbol);
+    if (yahooPrimary && yahooPrimary.marketStatus === 'LIVE') {
+      chosen = yahooPrimary;
     } else {
-      const kraken = await fetchKrakenPaxg(timeframe);
-      if (kraken) {
-        chosen = kraken;
-      } else {
-        chosen = spotXau || (await fetchYahooXau('GC=F', timeframe));
+      try {
+        return await getTradingViewBrokerSnapshot('OANDA', timeframe, symbol);
+      } catch {
+        chosen = yahooPrimary;
       }
+    }
+  } else {
+    const spotXau = await fetchYahooMarket('XAUUSD=X', timeframe, 'XAU/USD');
+    if (spotXau && spotXau.marketStatus === 'LIVE') {
+      chosen = spotXau;
+    } else {
+      chosen =
+        (await fetchBinanceMarket('PAXGUSDT', timeframe, 'XAU/USD')) ||
+        (await fetchKrakenMarket('PAXGUSD', timeframe, 'XAU/USD')) ||
+        spotXau ||
+        (await fetchYahooMarket('GC=F', timeframe, 'XAU/USD'));
     }
   }
 
   if (!chosen) {
     throw new Error(
-      `Gagal mengambil data pasar XAU/USD ${timeframe} real-time dari penyedia feed upstream.`
+      `Gagal mengambil data pasar ${symbol} ${timeframe} real-time dari penyedia feed upstream.`
     );
   }
 
@@ -2557,14 +2644,14 @@ async function loadSpotFallbackFeed(timeframe: ChartTimeframe): Promise<MarketSn
   const currentBoundary = alignToTimeframe(nowSec, tfMeta.seconds);
   const candleCloseInSec = Math.max(0, currentBoundary + tfMeta.seconds - nowSec);
 
-  const pack = buildIndicatorPack(chosen.candles);
+  const pack = buildIndicatorPack(chosen.candles, symbol);
   const quote: MarketQuote = {
-    symbol: 'XAU/USD',
+    symbol,
     timeframe,
     bid: chosen.bid,
     ask: chosen.ask,
     mid: chosen.mid,
-    spread: Number((chosen.ask - chosen.bid).toFixed(2)),
+    spread: Number(Math.max(0, chosen.ask - chosen.bid).toFixed(dec)),
     change24h: chosen.change24h,
     changePercent24h: chosen.changePercent24h,
     high24h: chosen.high24h,
@@ -2587,16 +2674,19 @@ async function loadSpotFallbackFeed(timeframe: ChartTimeframe): Promise<MarketSn
     bbLowerSeries: pack.bbLowerSeries,
   };
 
-  spotCacheByTf.set(timeframe, { snapshot, fetchedAt: Date.now() });
+  const cacheKey = `${symbol}:${timeframe}`;
+  spotCacheByTf.set(cacheKey, { snapshot, fetchedAt: Date.now() });
   return snapshot;
 }
 
 async function getSpotFallbackSnapshot(
   timeframe: ChartTimeframe,
-  forceRefresh = false
+  forceRefresh = false,
+  symbol: TradingSymbol = 'XAU/USD'
 ): Promise<MarketSnapshot> {
   const tfMeta = TIMEFRAME_META[timeframe];
-  const cached = spotCacheByTf.get(timeframe);
+  const cacheKey = `${symbol}:${timeframe}`;
+  const cached = spotCacheByTf.get(cacheKey);
   if (!forceRefresh && cached && Date.now() - cached.fetchedAt < 2000) {
     const nowSec = Math.floor(Date.now() / 1000);
     const currentBoundary = alignToTimeframe(nowSec, tfMeta.seconds);
@@ -2604,15 +2694,15 @@ async function getSpotFallbackSnapshot(
     return cached.snapshot;
   }
 
-  const existingPromise = activeSpotFetchByTf.get(timeframe);
+  const existingPromise = activeSpotFetchByTf.get(cacheKey);
   if (existingPromise) {
     return existingPromise;
   }
 
-  const promise = loadSpotFallbackFeed(timeframe).finally(() => {
-    activeSpotFetchByTf.delete(timeframe);
+  const promise = loadSpotFallbackFeed(timeframe, symbol).finally(() => {
+    activeSpotFetchByTf.delete(cacheKey);
   });
-  activeSpotFetchByTf.set(timeframe, promise);
+  activeSpotFetchByTf.set(cacheKey, promise);
   return promise;
 }
 
@@ -2623,30 +2713,43 @@ let mt5LiveFeedUpdatedAt = 0;
 async function getMarketSnapshot(
   brokerId: BrokerFeedId = 'PEPPERSTONE',
   timeframe: ChartTimeframe = 'M5',
-  forceRefresh = false
+  forceRefresh = false,
+  symbol: TradingSymbol = 'XAU/USD'
 ): Promise<MarketSnapshot> {
   const tfMeta = TIMEFRAME_META[timeframe];
 
   if (brokerId === 'MT5_LIVE') {
-    if (!mt5LiveSnapshot || Date.now() - mt5LiveFeedUpdatedAt > 60000) {
+    const mt5SymMatch =
+      mt5LiveSnapshot &&
+      normalizeTradingSymbol(mt5LiveSnapshot.quote.symbol) === symbol;
+    if (!mt5LiveSnapshot || !mt5SymMatch || Date.now() - mt5LiveFeedUpdatedAt > 60000) {
       throw new Error(
-        'Terminal MT5 belum mengirim candle aktif. Jalankan EA AurumEA_XAUUSD_M5 di MT5 atau pilih broker seperti Pepperstone / Tickmill.'
+        `Terminal MT5 belum mengirim candle aktif ${symbol}. Jalankan EA di chart ${getSymbolMeta(symbol).mt5Symbol} MT5 atau pilih broker seperti Pepperstone / Tickmill.`
       );
     }
     const nowSec = Math.floor(Date.now() / 1000);
     const currentBoundary = alignToTimeframe(nowSec, tfMeta.seconds);
     const closeIn = Math.max(0, currentBoundary + tfMeta.seconds - nowSec);
 
-    if (timeframe === 'M5') {
+    if (timeframe === 'M5' || mt5LiveSnapshot.quote.timeframe === timeframe) {
       mt5LiveSnapshot.quote.candleCloseInSec = closeIn;
       return mt5LiveSnapshot;
     }
 
+    if (timeframe === 'M1') {
+      try {
+        return await getTradingViewBrokerSnapshot('PEPPERSTONE', 'M1', symbol);
+      } catch {
+        return getSpotFallbackSnapshot('M1', forceRefresh, symbol);
+      }
+    }
+
     const resampled = resampleCandlesToTimeframe(mt5LiveSnapshot.candles, timeframe);
-    const pack = buildIndicatorPack(resampled);
+    const pack = buildIndicatorPack(resampled, symbol);
     return {
       quote: {
         ...mt5LiveSnapshot.quote,
+        symbol,
         timeframe,
         candleCloseInSec: closeIn,
       },
@@ -2661,13 +2764,13 @@ async function getMarketSnapshot(
   }
 
   if (brokerId === 'AUTO_SPOT') {
-    return getSpotFallbackSnapshot(timeframe, forceRefresh);
+    return getSpotFallbackSnapshot(timeframe, forceRefresh, symbol);
   }
 
   try {
-    return await getTradingViewBrokerSnapshot(brokerId, timeframe);
+    return await getTradingViewBrokerSnapshot(brokerId, timeframe, symbol);
   } catch {
-    return getSpotFallbackSnapshot(timeframe, forceRefresh);
+    return getSpotFallbackSnapshot(timeframe, forceRefresh, symbol);
   }
 }
 
@@ -2838,20 +2941,149 @@ interface FastBullListPositionContext {
   promptBlock: string;
 }
 
-let fastBullPositionCache: { data: FastBullListPositionContext; fetchedAt: number } | null = null;
+const fastBullPositionCache = new Map<
+  TradingSymbol,
+  { data: FastBullListPositionContext; fetchedAt: number }
+>();
 
-async function fetchFastBullListPositionXauusd(): Promise<FastBullListPositionContext> {
-  if (fastBullPositionCache && Date.now() - fastBullPositionCache.fetchedAt < 15_000) {
-    return fastBullPositionCache.data;
+async function fetchFastBullListPosition(
+  symbol: TradingSymbol = 'XAU/USD'
+): Promise<FastBullListPositionContext> {
+  const cached = fastBullPositionCache.get(symbol);
+  if (cached && Date.now() - cached.fetchedAt < 15_000) {
+    return cached.data;
+  }
+
+  const symMeta = getSymbolMeta(symbol);
+  const dec = symMeta.decimals;
+
+  // BTC/USD uses Binance BTCUSDT Order Book Depth (no FastBull pairId)
+  if (symMeta.fastBullPairId === null) {
+    const binanceDepthUrl = 'https://data-api.binance.vision/api/v3/depth?symbol=BTCUSDT&limit=20';
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4500);
+    try {
+      const res = await fetch(binanceDepthUrl, { signal: controller.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const depth = (await res.json()) as {
+        bids?: Array<[string, string]>;
+        asks?: Array<[string, string]>;
+      };
+      const bids = (depth.bids || []).map(([p, q]) => ({ price: Number(p), qty: Number(q) }));
+      const asks = (depth.asks || []).map(([p, q]) => ({ price: Number(p), qty: Number(q) }));
+      if (bids.length === 0 || asks.length === 0) {
+        throw new Error('Order book Binance BTCUSDT kosong');
+      }
+
+      const bestBid = bids[0].price;
+      const bestAsk = asks[0].price;
+      const currentPrice = Number(((bestBid + bestAsk) / 2).toFixed(2));
+      const totalBidVol = bids.reduce((s, b) => s + b.qty, 0);
+      const totalAskVol = asks.reduce((s, a) => s + a.qty, 0);
+      const totVol = Math.max(0.0001, totalBidVol + totalAskVol);
+      const bidPct = Number(((totalBidVol / totVol) * 100).toFixed(1));
+      const askPct = Number(((totalAskVol / totVol) * 100).toFixed(1));
+
+      const orderBookBias: FastBullListPositionContext['orderBookBias'] =
+        totalBidVol > totalAskVol * 1.18
+          ? 'BUY'
+          : totalAskVol > totalBidVol * 1.18
+          ? 'SELL'
+          : 'NEUTRAL';
+
+      const topBidClusters: FastBullCluster[] = [...bids]
+        .sort((a, b) => b.qty - a.qty)
+        .slice(0, 3)
+        .map((b) => ({
+          range: `${b.price.toFixed(2)}`,
+          price: b.price,
+          buyPct: Number(((b.qty / totVol) * 100).toFixed(2)),
+          sellPct: 0,
+        }));
+      const topAskClusters: FastBullCluster[] = [...asks]
+        .sort((a, b) => b.qty - a.qty)
+        .slice(0, 3)
+        .map((a) => ({
+          range: `${a.price.toFixed(2)}`,
+          price: a.price,
+          buyPct: 0,
+          sellPct: Number(((a.qty / totVol) * 100).toFixed(2)),
+        }));
+
+      const data: FastBullListPositionContext = {
+        available: true,
+        sourceUrl: 'https://www.binance.com/en/trade/BTC_USDT',
+        currentPrice,
+        updatedAtIso: new Date().toISOString(),
+        openPositions: {
+          totalLongPct: bidPct,
+          totalShortPct: askPct,
+          nearLongPct: bidPct,
+          nearShortPct: askPct,
+          dominantSide:
+            bidPct >= 62
+              ? 'LONG_LEAN'
+              : askPct >= 62
+              ? 'SHORT_LEAN'
+              : 'BALANCED',
+          topClusters: [...topBidClusters.slice(0, 2), ...topAskClusters.slice(0, 2)],
+        },
+        pendingOrders: {
+          totalBuyPct: bidPct,
+          totalSellPct: askPct,
+          nearBuyPct: bidPct,
+          nearSellPct: askPct,
+          buyLimitBelowPct: bidPct,
+          sellLimitAbovePct: askPct,
+          buyStopAbovePct: 0,
+          sellStopBelowPct: 0,
+          topBuyLimitsBelow: topBidClusters,
+          topSellLimitsAbove: topAskClusters,
+          topBuyStopsAbove: [],
+          topSellStopsBelow: [],
+        },
+        orderBookBias,
+        summary: `BTCUSDT Depth Mid ${currentPrice.toFixed(2)} | Bid Wall ${bidPct}% vs Ask Wall ${askPct}% (Bias ${orderBookBias})`,
+        promptBlock: [
+          `Sumber Resmi: Binance Live Order Book Depth (BTCUSDT, Spot=${currentPrice.toFixed(2)})`,
+          `- Top-20 Bid Volume ${bidPct}% vs Ask Volume ${askPct}% | Bias Orderbook: ${orderBookBias}`,
+          `- Support Bid Wall Terbesar: ${topBidClusters.map((c) => `${c.range} (${c.buyPct}%)`).join(', ')}`,
+          `- Resistance Ask Wall Terbesar: ${topAskClusters.map((c) => `${c.range} (${c.sellPct}%)`).join(', ')}`,
+        ].join('\n'),
+      };
+      fastBullPositionCache.set(symbol, { data, fetchedAt: Date.now() });
+      return data;
+    } catch {
+      const fallback: FastBullListPositionContext = {
+        available: false,
+        sourceUrl: 'https://www.binance.com/en/trade/BTC_USDT',
+        currentPrice: null,
+        updatedAtIso: null,
+        openPositions: null,
+        pendingOrders: null,
+        orderBookBias: 'NEUTRAL',
+        summary: 'Order Book BTCUSDT sedang tidak merespons (gunakan feed utama + global sync).',
+        promptBlock: 'Order Book Depth BTCUSDT sementara tidak merespons; prioritaskan peta S/R & order flow lokal.',
+      };
+      fastBullPositionCache.set(symbol, { data: fallback, fetchedAt: Date.now() });
+      return fallback;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   const sourceUrl = 'https://www.fastbull.com/list-position';
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 4500);
+  const nearWindow = symMeta.defaultAtr * 10;
+  const nearLabel =
+    symMeta.assetClass === 'FOREX'
+      ? `±${Math.round(nearWindow * 10000)} pips`
+      : `±$${nearWindow.toFixed(0)}`;
 
   try {
     const res = await fetch(
-      'https://api.fastbull.com/fastbull-macro-data-service/api/getWebPendingOrder?orderType=0&pairId=28&selectTime=',
+      `https://api.fastbull.com/fastbull-macro-data-service/api/getWebPendingOrder?orderType=0&pairId=${symMeta.fastBullPairId}&selectTime=`,
       {
         signal: controller.signal,
         headers: {
@@ -2890,14 +3122,18 @@ async function fetchFastBullListPositionXauusd(): Promise<FastBullListPositionCo
 
     const items = JSON.parse(payload.bodyMessage) as FastBullRawItem[];
     if (!Array.isArray(items) || items.length === 0) {
-      throw new Error('Data XAUUSD list-position kosong');
+      throw new Error(`Data ${symMeta.mt5Symbol} list-position kosong`);
     }
 
     const pendingItem = items.find((i) => i.type === 1) ?? items[0];
     const positionItem = items.find((i) => i.type === 2) ?? items[1] ?? null;
 
     const curPriceRaw = Number(pendingItem?.currentPrice ?? positionItem?.currentPrice);
-    const currentPrice = Number.isFinite(curPriceRaw) && curPriceRaw > 100 ? Number(curPriceRaw.toFixed(2)) : null;
+    const minValid = symbol === 'XAU/USD' ? 100 : 0.2;
+    const currentPrice =
+      Number.isFinite(curPriceRaw) && curPriceRaw > minValid
+        ? Number(curPriceRaw.toFixed(dec))
+        : null;
     const createTs = Number(pendingItem?.createTime ?? positionItem?.createTime);
     const updatedAtIso =
       Number.isFinite(createTs) && createTs > 1_000_000_000
@@ -2906,7 +3142,6 @@ async function fetchFastBullListPositionXauusd(): Promise<FastBullListPositionCo
 
     const spotRef = currentPrice ?? 0;
 
-    // Parse Item type=1 (Pending Orders: Buy Limit/Stop & Sell Limit/Stop)
     let pendingOrders: FastBullListPositionContext['pendingOrders'] = null;
     if (pendingItem && Array.isArray(pendingItem.minPrice) && Array.isArray(pendingItem.buyOrder) && Array.isArray(pendingItem.sellOrder)) {
       let totalBuy = 0;
@@ -2926,11 +3161,11 @@ async function fetchFastBullListPositionXauusd(): Promise<FastBullListPositionCo
         const p = Number(pendingItem.minPrice[i]);
         const b = Number(pendingItem.buyOrder[i]) || 0;
         const s = Number(pendingItem.sellOrder[i]) || 0;
-        const range = pendingItem.priceRange?.[i] || `${p.toFixed(2)}`;
+        const range = pendingItem.priceRange?.[i] || `${p.toFixed(dec)}`;
         totalBuy += b;
         totalSell += s;
 
-        if (spotRef > 0 && Math.abs(p - spotRef) <= 25) {
+        if (spotRef > 0 && Math.abs(p - spotRef) <= nearWindow) {
           nearBuy += b;
           nearSell += s;
           if (p <= spotRef) {
@@ -2963,7 +3198,6 @@ async function fetchFastBullListPositionXauusd(): Promise<FastBullListPositionCo
       };
     }
 
-    // Parse Item type=2 (Open Positions: Active Trader Long vs Short)
     let openPositions: FastBullListPositionContext['openPositions'] = null;
     if (positionItem && Array.isArray(positionItem.minPrice) && Array.isArray(positionItem.buyOrder) && Array.isArray(positionItem.sellOrder)) {
       let totalLong = 0;
@@ -2976,11 +3210,11 @@ async function fetchFastBullListPositionXauusd(): Promise<FastBullListPositionCo
         const p = Number(positionItem.minPrice[i]);
         const b = Number(positionItem.buyOrder[i]) || 0;
         const s = Number(positionItem.sellOrder[i]) || 0;
-        const range = positionItem.priceRange?.[i] || `${p.toFixed(2)}`;
+        const range = positionItem.priceRange?.[i] || `${p.toFixed(dec)}`;
         totalLong += b;
         totalShort += s;
 
-        if (spotRef > 0 && Math.abs(p - spotRef) <= 25) {
+        if (spotRef > 0 && Math.abs(p - spotRef) <= nearWindow) {
           nearLong += b;
           nearShort += s;
           if (b >= 0.12 || s >= 0.12) {
@@ -3015,7 +3249,6 @@ async function fetchFastBullListPositionXauusd(): Promise<FastBullListPositionCo
       };
     }
 
-    // Synthesize near-spot institutional orderbook pressure
     let orderBookBias: FastBullListPositionContext['orderBookBias'] = 'NEUTRAL';
     if (pendingOrders) {
       const demandScore = pendingOrders.buyLimitBelowPct + pendingOrders.buyStopAbovePct * 0.5;
@@ -3033,11 +3266,11 @@ async function fetchFastBullListPositionXauusd(): Promise<FastBullListPositionCo
         : 'Tidak ada cluster besar';
 
     const posText = openPositions
-      ? `Open Positions: Long ${openPositions.totalLongPct}% vs Short ${openPositions.totalShortPct}% [${openPositions.dominantSide}] | Dekat Spot (±$25): Long ${openPositions.nearLongPct}% vs Short ${openPositions.nearShortPct}%`
+      ? `Open Positions: Long ${openPositions.totalLongPct}% vs Short ${openPositions.totalShortPct}% [${openPositions.dominantSide}] | Dekat Spot (${nearLabel}): Long ${openPositions.nearLongPct}% vs Short ${openPositions.nearShortPct}%`
       : 'Open Positions: N/A';
 
     const ordText = pendingOrders
-      ? `Pending Orders (±$25): BuyLimit=${pendingOrders.buyLimitBelowPct}% (Support: ${fmtClusters(
+      ? `Pending Orders (${nearLabel}): BuyLimit=${pendingOrders.buyLimitBelowPct}% (Support: ${fmtClusters(
           pendingOrders.topBuyLimitsBelow,
           'buy'
         )}) | SellLimit=${pendingOrders.sellLimitAbovePct}% (Resist: ${fmtClusters(
@@ -3052,21 +3285,22 @@ async function fetchFastBullListPositionXauusd(): Promise<FastBullListPositionCo
         )})`
       : 'Pending Orders: N/A';
 
-    const summary = `Spot Ref ${currentPrice ?? 'N/A'} | ${
+    const spotStr = currentPrice !== null ? currentPrice.toFixed(dec) : 'N/A';
+    const summary = `Spot Ref ${spotStr} | ${
       openPositions
         ? `OpenPos Long ${openPositions.totalLongPct}% / Short ${openPositions.totalShortPct}% (${openPositions.dominantSide})`
         : 'OpenPos N/A'
     } | ${
       pendingOrders
-        ? `Pending ±$25: BuyLimit ${pendingOrders.buyLimitBelowPct}% vs SellLimit ${pendingOrders.sellLimitAbovePct}% (Bias ${orderBookBias})`
+        ? `Pending ${nearLabel}: BuyLimit ${pendingOrders.buyLimitBelowPct}% vs SellLimit ${pendingOrders.sellLimitAbovePct}% (Bias ${orderBookBias})`
         : 'Pending N/A'
     }`;
 
     const promptBlock = [
-      `Sumber Resmi: ${sourceUrl} (XAUUSD Live Order & Position Book, Update: ${updatedAtIso ?? 'Real-Time'}, Spot Ref FastBull=${currentPrice ?? 'N/A'})`,
+      `Sumber Resmi: ${sourceUrl} (${symMeta.mt5Symbol} Live Order & Position Book, Update: ${updatedAtIso ?? 'Real-Time'}, Spot Ref FastBull=${spotStr})`,
       `- ${posText}`,
       `- ${ordText}`,
-      `- Bias Orderbook ±$25: ${orderBookBias}${
+      `- Bias Orderbook ${nearLabel}: ${orderBookBias}${
         openPositions?.dominantSide === 'CROWDED_LONG'
           ? ' | PERINGATAN CROWDED LONG (>68% ritel Long): waspadai sapuan likuiditas / stop-hunt ke cluster SellStop di bawah harga!'
           : openPositions?.dominantSide === 'CROWDED_SHORT'
@@ -3086,7 +3320,7 @@ async function fetchFastBullListPositionXauusd(): Promise<FastBullListPositionCo
       summary,
       promptBlock,
     };
-    fastBullPositionCache = { data, fetchedAt: Date.now() };
+    fastBullPositionCache.set(symbol, { data, fetchedAt: Date.now() });
     return data;
   } catch {
     const fallback: FastBullListPositionContext = {
@@ -3097,10 +3331,10 @@ async function fetchFastBullListPositionXauusd(): Promise<FastBullListPositionCo
       openPositions: null,
       pendingOrders: null,
       orderBookBias: 'NEUTRAL',
-      summary: 'FastBull list-position sedang tidak merespons (gunakan feed utama + global sync).',
-      promptBlock: `Sumber: ${sourceUrl} — sementara tidak merespons; tetap prioritaskan peta S/R & order flow lokal.`,
+      summary: `FastBull list-position (${symMeta.mt5Symbol}) sedang tidak merespons (gunakan feed utama + global sync).`,
+      promptBlock: `Sumber: ${sourceUrl} (${symMeta.mt5Symbol}) — sementara tidak merespons; tetap prioritaskan peta S/R & order flow lokal.`,
     };
-    fastBullPositionCache = { data: fallback, fetchedAt: Date.now() };
+    fastBullPositionCache.set(symbol, { data: fallback, fetchedAt: Date.now() });
     return fallback;
   } finally {
     clearTimeout(timer);
@@ -3115,70 +3349,105 @@ interface GlobalSyncContext {
   summary: string;
 }
 
-let globalSyncCache: { data: GlobalSyncContext; fetchedAt: number; refMid: number } | null = null;
+const globalSyncCache = new Map<
+  TradingSymbol,
+  { data: GlobalSyncContext; fetchedAt: number; refMid: number }
+>();
 
-async function fetchGlobalXauSyncContext(
+async function fetchGlobalSyncContext(
+  symbol: TradingSymbol,
   primaryQuote: MarketQuote,
   fastBullSpot?: number | null
 ): Promise<GlobalSyncContext> {
+  const symMeta = getSymbolMeta(symbol);
+  const dec = symMeta.decimals;
+  const cached = globalSyncCache.get(symbol);
   if (
-    globalSyncCache &&
-    Date.now() - globalSyncCache.fetchedAt < 12_000 &&
-    Math.abs(globalSyncCache.refMid - primaryQuote.mid) < 1.5
+    cached &&
+    Date.now() - cached.fetchedAt < 12_000 &&
+    Math.abs(cached.refMid - primaryQuote.mid) < symMeta.defaultAtr * 0.6
   ) {
-    return globalSyncCache.data;
+    return cached.data;
   }
-
-  const [yahooSpot, yahooFutures, binancePaxg] = await Promise.all([
-    fetchYahooQuoteMetric('XAUUSD=X'),
-    fetchYahooQuoteMetric('GC=F'),
-    fetchBinancePaxg('M5').catch(() => null),
-  ]);
 
   const quotes: Array<{ source: string; mid: number }> = [
     { source: primaryQuote.source, mid: primaryQuote.mid },
   ];
-  if (fastBullSpot && fastBullSpot > 1000) {
-    quotes.push({ source: 'FastBull (list-position XAUUSD)', mid: Number(fastBullSpot.toFixed(2)) });
-  }
-  if (yahooSpot.price && yahooSpot.price > 1000) {
-    quotes.push({ source: 'Yahoo Spot (XAUUSD=X)', mid: Number(yahooSpot.price.toFixed(2)) });
-  }
-  if (yahooFutures.price && yahooFutures.price > 1000) {
-    quotes.push({ source: 'COMEX Gold Futures (GC=F)', mid: Number(yahooFutures.price.toFixed(2)) });
-  }
-  if (binancePaxg && binancePaxg.mid > 1000) {
-    quotes.push({ source: 'Binance PAXG/USDT', mid: binancePaxg.mid });
+
+  if (symbol === 'XAU/USD') {
+    const [yahooSpot, yahooFutures, binancePaxg] = await Promise.all([
+      fetchYahooQuoteMetric('XAUUSD=X'),
+      fetchYahooQuoteMetric('GC=F'),
+      fetchBinanceMarket('PAXGUSDT', 'M5', 'XAU/USD').catch(() => null),
+    ]);
+    if (fastBullSpot && fastBullSpot > 1000) {
+      quotes.push({ source: 'FastBull (list-position XAUUSD)', mid: Number(fastBullSpot.toFixed(2)) });
+    }
+    if (yahooSpot.price && yahooSpot.price > 1000) {
+      quotes.push({ source: 'Yahoo Spot (XAUUSD=X)', mid: Number(yahooSpot.price.toFixed(2)) });
+    }
+    if (yahooFutures.price && yahooFutures.price > 1000) {
+      quotes.push({ source: 'COMEX Gold Futures (GC=F)', mid: Number(yahooFutures.price.toFixed(2)) });
+    }
+    if (binancePaxg && binancePaxg.mid > 1000) {
+      quotes.push({ source: 'Binance PAXG/USDT', mid: binancePaxg.mid });
+    }
+  } else if (symbol === 'GBP/USD' || symbol === 'EUR/USD') {
+    const yahooPair = await fetchYahooQuoteMetric(symMeta.yahooSymbols[0]);
+    if (fastBullSpot && fastBullSpot > 0.2) {
+      quotes.push({ source: `FastBull (list-position ${symMeta.mt5Symbol})`, mid: Number(fastBullSpot.toFixed(dec)) });
+    }
+    if (yahooPair.price && yahooPair.price > 0.2) {
+      quotes.push({ source: `Yahoo Spot (${symMeta.yahooSymbols[0]})`, mid: Number(yahooPair.price.toFixed(dec)) });
+    }
+  } else {
+    const [binanceBtc, krakenBtc, yahooBtc] = await Promise.all([
+      fetchBinanceMarket('BTCUSDT', 'M5', 'BTC/USD').catch(() => null),
+      fetchKrakenMarket('XBTUSD', 'M5', 'BTC/USD').catch(() => null),
+      fetchYahooQuoteMetric('BTC-USD'),
+    ]);
+    if (fastBullSpot && fastBullSpot > 1000) {
+      quotes.push({ source: 'Binance Depth Mid (BTCUSDT)', mid: Number(fastBullSpot.toFixed(2)) });
+    }
+    if (binanceBtc && binanceBtc.mid > 1000) {
+      quotes.push({ source: 'Binance Spot (BTCUSDT)', mid: binanceBtc.mid });
+    }
+    if (krakenBtc && krakenBtc.mid > 1000) {
+      quotes.push({ source: 'Kraken Spot (XBTUSD)', mid: krakenBtc.mid });
+    }
+    if (yahooBtc.price && yahooBtc.price > 1000) {
+      quotes.push({ source: 'Yahoo Finance (BTC-USD)', mid: Number(yahooBtc.price.toFixed(2)) });
+    }
   }
 
   const mids = quotes.map((q) => q.mid).sort((a, b) => a - b);
   const consensusMid =
     mids.length > 0 ? mids[Math.floor(mids.length / 2)] : primaryQuote.mid;
   const maxDeviationUsd = Number(
-    Math.max(0, ...quotes.map((q) => Math.abs(q.mid - primaryQuote.mid))).toFixed(2)
+    Math.max(0, ...quotes.map((q) => Math.abs(q.mid - primaryQuote.mid))).toFixed(dec)
   );
   const syncStatus: GlobalSyncContext['syncStatus'] =
-    maxDeviationUsd <= 4.5 ? 'ALIGNED' : 'SPREAD_DIVERGENCE';
+    maxDeviationUsd <= symMeta.defaultAtr * 1.8 ? 'ALIGNED' : 'SPREAD_DIVERGENCE';
 
-  const partsText = quotes.map((q) => `${q.source}: ${q.mid.toFixed(2)}`).join(' | ');
-  const summary = `Konsensus Global ${consensusMid.toFixed(2)} (${syncStatus}, deviasi maks ±$${maxDeviationUsd.toFixed(
-    2
+  const partsText = quotes.map((q) => `${q.source}: ${q.mid.toFixed(dec)}`).join(' | ');
+  const summary = `Konsensus Global ${symbol} ${consensusMid.toFixed(dec)} (${syncStatus}, deviasi maks ±${maxDeviationUsd.toFixed(
+    dec
   )}) — ${partsText}`;
 
   const data: GlobalSyncContext = {
-    consensusMid: Number(consensusMid.toFixed(2)),
+    consensusMid: Number(consensusMid.toFixed(dec)),
     maxDeviationUsd,
     syncStatus,
     quotes,
     summary,
   };
-  globalSyncCache = { data, fetchedAt: Date.now(), refMid: primaryQuote.mid };
+  globalSyncCache.set(symbol, { data, fetchedAt: Date.now(), refMid: primaryQuote.mid });
   return data;
 }
 
 const mtfSummaryCache = new Map<string, { text: string; fetchedAt: number }>();
 
-function summarizeSnapshotTf(label: string, snap: MarketSnapshot): string {
+function summarizeSnapshotTf(label: string, snap: MarketSnapshot, dec = 2): string {
   const ind = snap.indicators;
   const emaBias =
     ind.ema9 !== null && ind.ema21 !== null
@@ -3189,17 +3458,19 @@ function summarizeSnapshotTf(label: string, snap: MarketSnapshot): string {
   const struct = ind.structure?.marketStructure ?? 'N/A';
   const rsi = ind.rsi14 !== null ? ind.rsi14.toFixed(1) : 'N/A';
   const adx = ind.adx14 !== null && ind.adx14 !== undefined ? ind.adx14.toFixed(1) : 'N/A';
-  const r1 = ind.structure?.nearestResistance?.price.toFixed(2) ?? 'N/A';
-  const s1 = ind.structure?.nearestSupport?.price.toFixed(2) ?? 'N/A';
+  const r1 = ind.structure?.nearestResistance?.price.toFixed(dec) ?? 'N/A';
+  const s1 = ind.structure?.nearestSupport?.price.toFixed(dec) ?? 'N/A';
   return `${label}: Bias=${emaBias} | Struct=${struct} | RSI=${rsi} | ADX=${adx} | S1=${s1} / R1=${r1}`;
 }
 
 async function fetchMultiTimeframeSummary(
   brokerId: BrokerFeedId,
   activeTf: ChartTimeframe,
-  primarySnapshot: MarketSnapshot
+  primarySnapshot: MarketSnapshot,
+  symbol: TradingSymbol = 'XAU/USD'
 ): Promise<{ promptBlock: string; compactSummary: string }> {
-  const cacheKey = `${brokerId}:${activeTf}`;
+  const dec = getSymbolMeta(symbol).decimals;
+  const cacheKey = `${symbol}:${brokerId}:${activeTf}`;
   const cached = mtfSummaryCache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < 25_000) {
     return {
@@ -3208,10 +3479,12 @@ async function fetchMultiTimeframeSummary(
     };
   }
 
-  const tfList: ChartTimeframe[] = ['M5', 'M15', 'M30', 'H1'];
+  const tfList: ChartTimeframe[] = ['M1', 'M5', 'M15', 'M30', 'H1'];
   const settled = await Promise.allSettled(
     tfList.map((tf) =>
-      tf === activeTf ? Promise.resolve(primarySnapshot) : getMarketSnapshot(brokerId, tf, false)
+      tf === activeTf
+        ? Promise.resolve(primarySnapshot)
+        : getMarketSnapshot(brokerId, tf, false, symbol)
     )
   );
 
@@ -3220,7 +3493,7 @@ async function fetchMultiTimeframeSummary(
   settled.forEach((res, idx) => {
     const tf = tfList[idx];
     if (res.status === 'fulfilled') {
-      lines.push(summarizeSnapshotTf(tf, res.value));
+      lines.push(summarizeSnapshotTf(tf, res.value, dec));
       if (tf === 'H1') h1Candles = res.value.candles;
     }
   });
@@ -3241,7 +3514,7 @@ async function fetchMultiTimeframeSummary(
       });
     }
     if (h4Candles.length >= 10) {
-      const h4Pack = buildIndicatorPack(h4Candles);
+      const h4Pack = buildIndicatorPack(h4Candles, symbol);
       const lastH4 = h4Candles[h4Candles.length - 1];
       const h4Bias =
         h4Pack.snapshot.ema9 !== null && h4Pack.snapshot.ema21 !== null
@@ -3260,11 +3533,11 @@ async function fetchMultiTimeframeSummary(
   }
 
   const promptBlock =
-    lines.length > 0 ? lines.join('\n') : summarizeSnapshotTf(activeTf, primarySnapshot);
+    lines.length > 0 ? lines.join('\n') : summarizeSnapshotTf(activeTf, primarySnapshot, dec);
   mtfSummaryCache.set(cacheKey, { text: promptBlock, fetchedAt: Date.now() });
   return {
     promptBlock,
-    compactSummary: lines.slice(0, 4).join(' · ') || summarizeSnapshotTf(activeTf, primarySnapshot),
+    compactSummary: lines.slice(0, 4).join(' · ') || summarizeSnapshotTf(activeTf, primarySnapshot, dec),
   };
 }
 
@@ -3319,6 +3592,7 @@ async function startServer() {
   // ---------- MetaTrader 5 Real Account & Order Bridge State ----------
   interface Mt5Command {
     id: string;
+    symbol?: TradingSymbol;
     action: 'BUY' | 'SELL' | 'CLOSE' | 'CLOSE_ALL' | 'MODIFY_TP';
     lots?: number;
     sl?: number;
@@ -3445,6 +3719,7 @@ async function startServer() {
     }
 
     const body = req.body as {
+      symbol?: string;
       action?: 'BUY' | 'SELL' | 'CLOSE' | 'CLOSE_ALL' | 'MODIFY_TP';
       lots?: number;
       sl?: number;
@@ -3469,6 +3744,7 @@ async function startServer() {
 
     const cmd: Mt5Command = {
       id: `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      symbol: body.symbol ? normalizeTradingSymbol(body.symbol) : 'XAU/USD',
       action,
       lots: body.lots,
       sl: body.sl,
@@ -3575,6 +3851,10 @@ async function startServer() {
     }
 
     // Optional live broker price + M5 candle sync from MT5 EA (primary terminal priority)
+    const mt5Sym = normalizeTradingSymbol(body.symbol);
+    const mt5SymMeta = getSymbolMeta(mt5Sym);
+    const mt5Dec = mt5SymMeta.decimals;
+
     if (isPrimaryTerminal && Array.isArray(body.candles) && body.candles.length >= 30) {
       const cleaned = body.candles
         .filter(
@@ -3590,31 +3870,33 @@ async function startServer() {
 
       if (cleaned.length >= 30) {
         const last = cleaned[cleaned.length - 1];
-        const bid = Number((body.bid && body.bid > 0 ? body.bid : last.close).toFixed(2));
-        const ask = Number((body.ask && body.ask > 0 ? body.ask : bid + 0.2).toFixed(2));
-        const mid = Number(((bid + ask) / 2).toFixed(2));
-        const pack = buildIndicatorPack(cleaned);
+        const bid = Number((body.bid && body.bid > 0 ? body.bid : last.close).toFixed(mt5Dec));
+        const ask = Number(
+          (body.ask && body.ask > 0 ? body.ask : bid + mt5SymMeta.spreadFallback).toFixed(mt5Dec)
+        );
+        const mid = Number(((bid + ask) / 2).toFixed(mt5Dec));
+        const pack = buildIndicatorPack(cleaned, mt5Sym);
         const nowSec = Math.floor(Date.now() / 1000);
         const boundary = alignToM5(nowSec);
         const firstOpen = cleaned[0].open;
-        const change24h = Number((mid - firstOpen).toFixed(2));
+        const change24h = Number((mid - firstOpen).toFixed(mt5Dec));
 
         mt5LiveSnapshot = {
           quote: {
-            symbol: body.symbol || 'XAU/USD',
+            symbol: mt5Sym,
             timeframe: 'M5',
             bid,
             ask,
             mid,
-            spread: Number(Math.max(0, ask - bid).toFixed(2)),
+            spread: Number(Math.max(0, ask - bid).toFixed(mt5Dec)),
             change24h,
             changePercent24h:
               firstOpen > 0 ? Number(((change24h / firstOpen) * 100).toFixed(2)) : 0,
-            high24h: Number(Math.max(...cleaned.map((c) => c.high)).toFixed(2)),
-            low24h: Number(Math.min(...cleaned.map((c) => c.low)).toFixed(2)),
+            high24h: Number(Math.max(...cleaned.map((c) => c.high)).toFixed(mt5Dec)),
+            low24h: Number(Math.min(...cleaned.map((c) => c.low)).toFixed(mt5Dec)),
             source: `MT5 ${mt5LiveAccount.company} (${mt5LiveAccount.server})`,
             brokerId: 'MT5_LIVE',
-            brokerSymbol: `${mt5LiveAccount.server}:${body.symbol || 'XAUUSD'}`,
+            brokerSymbol: `${mt5LiveAccount.server}:${body.symbol || mt5SymMeta.mt5Symbol}`,
             marketStatus: 'LIVE',
             updatedAt: Date.now(),
             candleCloseInSec: Math.max(0, boundary + 300 - nowSec),
@@ -3632,18 +3914,19 @@ async function startServer() {
     } else if (
       isPrimaryTerminal &&
       mt5LiveSnapshot &&
+      normalizeTradingSymbol(mt5LiveSnapshot.quote.symbol) === mt5Sym &&
       body.bid &&
       body.ask &&
       body.bid > 0 &&
       body.ask > 0
     ) {
-      const bid = Number(body.bid.toFixed(2));
-      const ask = Number(body.ask.toFixed(2));
-      const mid = Number(((bid + ask) / 2).toFixed(2));
+      const bid = Number(body.bid.toFixed(mt5Dec));
+      const ask = Number(body.ask.toFixed(mt5Dec));
+      const mid = Number(((bid + ask) / 2).toFixed(mt5Dec));
       mt5LiveSnapshot.quote.bid = bid;
       mt5LiveSnapshot.quote.ask = ask;
       mt5LiveSnapshot.quote.mid = mid;
-      mt5LiveSnapshot.quote.spread = Number(Math.max(0, ask - bid).toFixed(2));
+      mt5LiveSnapshot.quote.spread = Number(Math.max(0, ask - bid).toFixed(mt5Dec));
       mt5LiveSnapshot.quote.updatedAt = Date.now();
       mt5LiveFeedUpdatedAt = Date.now();
     }
@@ -3660,20 +3943,25 @@ async function startServer() {
       return true;
     });
 
-    const nextCmd = mt5CommandQueue.find((cmd) => !cmd.deliveredTo.has(terminalId));
+    const nextCmd = mt5CommandQueue.find(
+      (cmd) =>
+        !cmd.deliveredTo.has(terminalId) &&
+        (!cmd.symbol || !body.symbol || normalizeTradingSymbol(cmd.symbol) === mt5Sym)
+    );
     let mt5Line = 'NONE';
     if (nextCmd) {
       nextCmd.deliveredTo.add(terminalId);
+      const cmdDec = getSymbolMeta(nextCmd.symbol ?? mt5Sym).decimals;
       if (nextCmd.action === 'BUY' || nextCmd.action === 'SELL') {
         mt5Line = [
           'CMD',
           nextCmd.id,
           nextCmd.action,
           Number(nextCmd.lots || 0.01).toFixed(2),
-          Number(nextCmd.sl || 0).toFixed(2),
-          Number(nextCmd.tp || 0).toFixed(2),
+          Number(nextCmd.sl || 0).toFixed(cmdDec),
+          Number(nextCmd.tp || 0).toFixed(cmdDec),
           nextCmd.comment || 'AurumEA',
-          Number(nextCmd.refEntry || 0).toFixed(2),
+          Number(nextCmd.refEntry || 0).toFixed(cmdDec),
         ].join('|');
       } else if (nextCmd.action === 'CLOSE') {
         mt5Line = [
@@ -3692,9 +3980,9 @@ async function startServer() {
           nextCmd.id,
           'MODIFY_TP',
           nextCmd.side || 'BUY',
-          Number(nextCmd.tp || 0).toFixed(2),
+          Number(nextCmd.tp || 0).toFixed(cmdDec),
           String(nextCmd.ticket || 0),
-          Number(nextCmd.refEntry || 0).toFixed(2),
+          Number(nextCmd.refEntry || 0).toFixed(cmdDec),
         ].join('|');
       }
 
@@ -3716,9 +4004,10 @@ async function startServer() {
     }
   });
 
-  app.get('/api/market/fastbull-position', async (_req, res) => {
+  app.get('/api/market/fastbull-position', async (req, res) => {
     try {
-      const fb = await fetchFastBullListPositionXauusd();
+      const symbol = normalizeTradingSymbol(req.query.symbol as string);
+      const fb = await fetchFastBullListPosition(symbol);
       res.json(fb);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Gagal memuat FastBull list-position.';
@@ -3727,19 +4016,21 @@ async function startServer() {
   });
 
   app.get('/api/market/candles', async (req, res) => {
+    const symbol = normalizeTradingSymbol(req.query.symbol as string);
     try {
       const brokerId = normalizeBrokerId(req.query.broker);
       const timeframe = normalizeTimeframe(req.query.timeframe);
-      const snapshot = await getMarketSnapshot(brokerId, timeframe, false);
+      const snapshot = await getMarketSnapshot(brokerId, timeframe, false, symbol);
       res.json(snapshot);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Gagal memuat data chart XAU/USD.';
+      const message = err instanceof Error ? err.message : `Gagal memuat data chart ${symbol}.`;
       res.status(502).json({ error: message });
     }
   });
 
-  // Real-time Server-Sent Events stream for XAU/USD ticks per selected broker & timeframe
+  // Real-time Server-Sent Events stream for active trading pair ticks per selected broker & timeframe
   app.get('/api/market/stream', async (req, res) => {
+    const symbol = normalizeTradingSymbol(req.query.symbol as string);
     const brokerId = normalizeBrokerId(req.query.broker);
     const timeframe = normalizeTimeframe(req.query.timeframe);
     res.setHeader('Content-Type', 'text/event-stream');
@@ -3752,7 +4043,7 @@ async function startServer() {
     const pushTick = async (force: boolean) => {
       if (closed) return;
       try {
-        const snapshot = await getMarketSnapshot(brokerId, timeframe, force);
+        const snapshot = await getMarketSnapshot(brokerId, timeframe, force, symbol);
         if (!closed) {
           res.write(`event: tick\ndata: ${JSON.stringify(snapshot)}\n\n`);
         }
@@ -3803,6 +4094,7 @@ async function startServer() {
     }
     try {
       const body = req.body as {
+        symbol?: TradingSymbol;
         chartImageBase64?: string;
         uploadedChartImageBase64?: string;
         strategyFocus?:
@@ -3888,6 +4180,9 @@ async function startServer() {
       const thinkingHigh = body.aiThinkingHigh ?? true;
 
       const requestedTf = normalizeTimeframe(body.timeframe);
+      const requestedSymbol = normalizeTradingSymbol(body.symbol || body.mt5Symbol);
+      const reqSymMeta = getSymbolMeta(requestedSymbol);
+      const reqDec = reqSymMeta.decimals;
       const tfSec = TIMEFRAME_META[requestedTf].seconds;
 
       let snapshot: MarketSnapshot;
@@ -3904,31 +4199,33 @@ async function startServer() {
           .sort((a, b) => a.time - b.time);
 
         const last = cleanedCandles[cleanedCandles.length - 1];
-        const bid = Number((body.mt5Bid && body.mt5Bid > 0 ? body.mt5Bid : last.close).toFixed(2));
+        const bid = Number((body.mt5Bid && body.mt5Bid > 0 ? body.mt5Bid : last.close).toFixed(reqDec));
         const ask = Number(
-          (body.mt5Ask && body.mt5Ask > 0 ? body.mt5Ask : bid + 0.25).toFixed(2)
+          (body.mt5Ask && body.mt5Ask > 0 ? body.mt5Ask : bid + reqSymMeta.spreadFallback).toFixed(
+            reqDec
+          )
         );
-        const mid = Number(((bid + ask) / 2).toFixed(2));
-        const pack = buildIndicatorPack(cleanedCandles);
+        const mid = Number(((bid + ask) / 2).toFixed(reqDec));
+        const pack = buildIndicatorPack(cleanedCandles, requestedSymbol);
         const nowSec = Math.floor(Date.now() / 1000);
         const boundary = Math.floor(nowSec / tfSec) * tfSec;
         const firstOpen = cleanedCandles[0].open;
-        const change24h = Number((mid - firstOpen).toFixed(2));
+        const change24h = Number((mid - firstOpen).toFixed(reqDec));
 
         snapshot = {
           quote: {
-            symbol: body.mt5Symbol || 'XAU/USD',
+            symbol: requestedSymbol,
             timeframe: requestedTf,
             bid,
             ask,
             mid,
-            spread: Number((ask - bid).toFixed(2)),
+            spread: Number((ask - bid).toFixed(reqDec)),
             change24h,
             changePercent24h:
               firstOpen > 0 ? Number(((change24h / firstOpen) * 100).toFixed(2)) : 0,
-            high24h: Number(Math.max(...cleanedCandles.map((c) => c.high)).toFixed(2)),
-            low24h: Number(Math.min(...cleanedCandles.map((c) => c.low)).toFixed(2)),
-            source: `MetaTrader 5 (${body.mt5Symbol || 'XAUUSD'})`,
+            high24h: Number(Math.max(...cleanedCandles.map((c) => c.high)).toFixed(reqDec)),
+            low24h: Number(Math.min(...cleanedCandles.map((c) => c.low)).toFixed(reqDec)),
+            source: `MetaTrader 5 (${body.mt5Symbol || reqSymMeta.mt5Symbol})`,
             brokerId: 'MT5_LIVE',
             marketStatus: 'LIVE',
             updatedAt: Date.now(),
@@ -3944,8 +4241,11 @@ async function startServer() {
         };
       } else {
         const brokerId = normalizeBrokerId(body.brokerFeed);
-        snapshot = await getMarketSnapshot(brokerId, requestedTf, true);
+        snapshot = await getMarketSnapshot(brokerId, requestedTf, true, requestedSymbol);
       }
+      const activeSymbol = normalizeTradingSymbol(snapshot.quote.symbol || requestedSymbol);
+      const symMeta = getSymbolMeta(activeSymbol);
+      const dec = symMeta.decimals;
       const tfLabel = snapshot.quote.timeframe || requestedTf;
 
       const recentCandles = snapshot.candles.slice(-30);
@@ -3956,10 +4256,12 @@ async function startServer() {
         .map((c) => {
           const iso = new Date(c.time * 1000).toISOString().slice(11, 16);
           const dir = c.close >= c.open ? 'BULL' : 'BEAR';
-          const bodySz = Math.abs(c.close - c.open).toFixed(2);
-          const upWick = (c.high - Math.max(c.open, c.close)).toFixed(2);
-          const dnWick = (Math.min(c.open, c.close) - c.low).toFixed(2);
-          return `${iso} | O:${c.open} H:${c.high} L:${c.low} C:${c.close} | Body:${bodySz} UW:${upWick} LW:${dnWick} (${dir})`;
+          const bodySz = Math.abs(c.close - c.open).toFixed(dec);
+          const upWick = (c.high - Math.max(c.open, c.close)).toFixed(dec);
+          const dnWick = (Math.min(c.open, c.close) - c.low).toFixed(dec);
+          return `${iso} | O:${c.open.toFixed(dec)} H:${c.high.toFixed(dec)} L:${c.low.toFixed(
+            dec
+          )} C:${c.close.toFixed(dec)} | Body:${bodySz} UW:${upWick} LW:${dnWick} (${dir})`;
         })
         .join('\n');
 
@@ -3982,7 +4284,9 @@ async function startServer() {
           .map((c) => {
             const iso = new Date(c.time * 1000).toISOString().slice(11, 16);
             const dir = c.close >= c.open ? 'BULL' : 'BEAR';
-            return `${iso} | O:${c.open} H:${c.high} L:${c.low} C:${c.close} (${dir})`;
+            return `${iso} | O:${c.open.toFixed(dec)} H:${c.high.toFixed(dec)} L:${c.low.toFixed(
+              dec
+            )} C:${c.close.toFixed(dec)} (${dir})`;
           })
           .join('\n');
         m1Section = `\n15 CANDLE M1 TERAKHIR (MICRO TIMING SCALPING):\n${m1Lines}\n`;
@@ -3992,9 +4296,9 @@ async function startServer() {
       const ema9Last = snapshot.ema9Series[snapshot.ema9Series.length - 1]?.value ?? null;
       const ema9Prev = snapshot.ema9Series[snapshot.ema9Series.length - 4]?.value ?? null;
       const ema9Slope =
-        ema9Last !== null && ema9Prev !== null ? Number((ema9Last - ema9Prev).toFixed(2)) : null;
+        ema9Last !== null && ema9Prev !== null ? Number((ema9Last - ema9Prev).toFixed(dec)) : null;
       const emaGap =
-        ind.ema9 !== null && ind.ema21 !== null ? Number((ind.ema9 - ind.ema21).toFixed(2)) : null;
+        ind.ema9 !== null && ind.ema21 !== null ? Number((ind.ema9 - ind.ema21).toFixed(dec)) : null;
 
       const strategyInstructionMap: Record<string, string> = {
         UNIFIED_8IN1:
@@ -4024,28 +4328,32 @@ async function startServer() {
         body.openPositionsCount ?? 0,
         Array.isArray(body.openPositionsDetail) ? body.openPositionsDetail.length : 0
       );
-      const atrValue = ind.atr14 ?? 2.5;
+      const atrValue = ind.atr14 ?? symMeta.defaultAtr;
       const spreadInfo =
         typeof body.mt5SpreadPoints === 'number'
-          ? `${snapshot.quote.spread} USD (${body.mt5SpreadPoints} pts MT5)`
-          : `${snapshot.quote.spread} USD`;
+          ? `${snapshot.quote.spread.toFixed(dec)} (${body.mt5SpreadPoints} pts MT5)`
+          : `${snapshot.quote.spread.toFixed(dec)}`;
       const slGuide = isUltraUnified
-        ? `${(atrValue * 0.8).toFixed(2)} - ${(atrValue * 1.0).toFixed(2)}`
+        ? `${(atrValue * 0.8).toFixed(dec)} - ${(atrValue * 1.0).toFixed(dec)}`
         : isScalpMode
-        ? `${(atrValue * 0.95).toFixed(2)} - ${(atrValue * 1.15).toFixed(2)}`
-        : `${(atrValue * 1.3).toFixed(2)} - ${(atrValue * 1.7).toFixed(2)}`;
+        ? `${(atrValue * 0.95).toFixed(dec)} - ${(atrValue * 1.15).toFixed(dec)}`
+        : `${(atrValue * 1.3).toFixed(dec)} - ${(atrValue * 1.7).toFixed(dec)}`;
       const tpGuide = isUltraUnified
-        ? `${(atrValue * 1.0).toFixed(2)} - ${(atrValue * 1.35).toFixed(2)} (Ultra-Scalp cepat <=30m)`
+        ? `${(atrValue * 1.0).toFixed(dec)} - ${(atrValue * 1.35).toFixed(dec)} (Ultra-Scalp cepat <=30m)`
         : isScalpMode
-        ? `${(atrValue * 1.25).toFixed(2)} - ${(atrValue * 1.6).toFixed(2)}`
-        : `${(atrValue * 1.8).toFixed(2)} - ${(atrValue * 2.5).toFixed(2)}`;
+        ? `${(atrValue * 1.25).toFixed(dec)} - ${(atrValue * 1.6).toFixed(dec)}`
+        : `${(atrValue * 1.8).toFixed(dec)} - ${(atrValue * 2.5).toFixed(dec)}`;
 
       const openDetailLines =
         Array.isArray(body.openPositionsDetail) && body.openPositionsDetail.length > 0
           ? body.openPositionsDetail
               .map(
                 (p, idx) =>
-                  `  #${idx + 1}: ${p.side} ${p.lots} lot @ ${p.entryPrice.toFixed(2)} | TP: ${p.takeProfit.toFixed(2)} | SL: TANPA SL (0) | Floating: ${p.floatingPnlUsd >= 0 ? '+' : '-'}$${Math.abs(p.floatingPnlUsd).toFixed(2)} | Umur: ${p.openedMinutesAgo} menit`
+                  `  #${idx + 1}: ${p.side} ${p.lots} lot @ ${p.entryPrice.toFixed(
+                    dec
+                  )} | TP: ${p.takeProfit.toFixed(dec)} | SL: TANPA SL (0) | Floating: ${
+                    p.floatingPnlUsd >= 0 ? '+' : '-'
+                  }$${Math.abs(p.floatingPnlUsd).toFixed(2)} | Umur: ${p.openedMinutesAgo} menit`
               )
               .join('\n')
           : '';
@@ -4061,7 +4369,7 @@ async function startServer() {
           (s, p) => s + Number(p.entryPrice) * Math.max(0.01, Number(p.lots) || 0.01),
           0
         );
-        return totLot > 0 ? (totVal / totLot).toFixed(2) : null;
+        return totLot > 0 ? (totVal / totLot).toFixed(dec) : null;
       };
       const avgBuyStr = calcAvgEntryForSide('BUY');
       const avgSellStr = calcAvgEntryForSide('SELL');
@@ -4123,9 +4431,11 @@ ATURAN KETAT PENILAIAN POSISI TERBUKA (AI EXIT JUDGE — positionDecision), MART
           (latestClosed.side === 'BUY'
             ? currentMark - latestClosed.closePrice
             : latestClosed.closePrice - currentMark
-          ).toFixed(2)
+          ).toFixed(dec)
         );
-        const atrFollowRatio = Number((directionalFollowThrough / Math.max(0.2, atrValue)).toFixed(2));
+        const atrFollowRatio = Number(
+          (directionalFollowThrough / Math.max(symMeta.minSlDistance * 0.5, atrValue)).toFixed(2)
+        );
         const rsiState =
           ind.rsi14 !== null
             ? ind.rsi14 >= 70
@@ -4137,8 +4447,8 @@ ATURAN KETAT PENILAIAN POSISI TERBUKA (AI EXIT JUDGE — positionDecision), MART
 
         const movementLabel =
           directionalFollowThrough >= 0
-            ? `MASIH LANJUT SEARAH (+${directionalFollowThrough} USD / +${atrFollowRatio} ATR melampaui titik close ${latestClosed.closePrice.toFixed(2)})`
-            : `BERBALIK / TERKOREKSI (${directionalFollowThrough} USD / ${atrFollowRatio} ATR dari titik close ${latestClosed.closePrice.toFixed(2)})`;
+            ? `MASIH LANJUT SEARAH (+${directionalFollowThrough.toFixed(dec)} / +${atrFollowRatio} ATR melampaui titik close ${latestClosed.closePrice.toFixed(dec)})`
+            : `BERBALIK / TERKOREKSI (${directionalFollowThrough.toFixed(dec)} / ${atrFollowRatio} ATR dari titik close ${latestClosed.closePrice.toFixed(dec)})`;
 
         postTpContextPayload = {
           last_trade_side: latestClosed.side,
@@ -4148,15 +4458,15 @@ ATURAN KETAT PENILAIAN POSISI TERBUKA (AI EXIT JUDGE — positionDecision), MART
           close_price: latestClosed.closePrice,
           take_profit_level: latestClosed.takeProfit,
           current_price: currentMark,
-          directional_follow_through_usd: directionalFollowThrough,
+          directional_follow_through: directionalFollowThrough,
           directional_follow_through_atr: atrFollowRatio,
           rsi_zone: rsiState,
           recent_trades: recentClosedList,
         };
 
         postTpInstruction = `\nKONTEKS PASCA-TP & EVALUASI LANJUTAN TREN (${hasRecentTpHit ? 'TP BARU TERCAPAI!' : 'RIWAYAT TUTUP TERBARU'}):
-- Trade Terakhir: ${latestClosed.side} @ ${latestClosed.entryPrice.toFixed(2)} -> ${latestClosed.closeReason} @ ${latestClosed.closePrice.toFixed(2)} (${latestClosed.points >= 0 ? '+' : ''}${latestClosed.points.toFixed(2)} pts / ${latestClosed.pnlUsd >= 0 ? '+' : '-'}$${Math.abs(latestClosed.pnlUsd).toFixed(2)}) sekitar ${latestClosed.closedMinutesAgo} menit lalu.
-- Posisi Harga Sekarang vs Titik Tutup: ${currentMark.toFixed(2)} -> ${movementLabel}.
+- Trade Terakhir: ${latestClosed.side} @ ${latestClosed.entryPrice.toFixed(dec)} -> ${latestClosed.closeReason} @ ${latestClosed.closePrice.toFixed(dec)} (${latestClosed.points >= 0 ? '+' : ''}${latestClosed.points.toFixed(dec)} ${symMeta.unitLabel} / ${latestClosed.pnlUsd >= 0 ? '+' : '-'}$${Math.abs(latestClosed.pnlUsd).toFixed(2)}) sekitar ${latestClosed.closedMinutesAgo} menit lalu.
+- Posisi Harga Sekarang vs Titik Tutup: ${currentMark.toFixed(dec)} -> ${movementLabel}.
 - Kondisi Indikator Penunjang Saat Ini: ${rsiState} | Bollinger Upper=${ind.bollinger.upper ?? 'N/A'} / Lower=${ind.bollinger.lower ?? 'N/A'}.
 ATURAN BERPIKIR SITUASIONAL PASCA-TP (WAJIB DIPATUHI):
 1. JIKA TP SUDAH TERCAPAI & HARGA MASIH BERLANJUT SEARAH:
@@ -4171,17 +4481,22 @@ ATURAN BERPIKIR SITUASIONAL PASCA-TP (WAJIB DIPATUHI):
    - Jika harga berbalik/terkoreksi setelah TP tercapai dan belum ada pembalikan struktur multi-candle yang benar-benar terkonfirmasi penuh (BOS/CHoCH kuat + dominasi order flow berlawanan), keputusan yang benar adalah "HOLD" (\`WAIT_PULLBACK_HOLD\` atau \`EXHAUSTION_SKIP\`), BUKAN membuka posisi balik arah.`;
       }
 
-      const deepLearningTelemetry = buildDeepLearningTelemetry(snapshot.candles, atrValue);
+      const deepLearningTelemetry = buildDeepLearningTelemetry(
+        snapshot.candles,
+        atrValue,
+        activeSymbol
+      );
       const chartStructure =
-        ind.structure ?? analyzeChartStructure(snapshot.candles, atrValue);
+        ind.structure ?? analyzeChartStructure(snapshot.candles, atrValue, activeSymbol);
 
       const brokerIdForMtf = normalizeBrokerId(body.brokerFeed);
       const [macroContext, fastBullPosition, mtfData] = await Promise.all([
         fetchMacroAndGeopoliticsContext(),
-        fetchFastBullListPositionXauusd(),
-        fetchMultiTimeframeSummary(brokerIdForMtf, requestedTf, snapshot),
+        fetchFastBullListPosition(activeSymbol),
+        fetchMultiTimeframeSummary(brokerIdForMtf, requestedTf, snapshot, activeSymbol),
       ]);
-      const globalSync = await fetchGlobalXauSyncContext(
+      const globalSync = await fetchGlobalSyncContext(
+        activeSymbol,
         snapshot.quote,
         fastBullPosition.currentPrice
       );
@@ -4191,9 +4506,9 @@ ATURAN BERPIKIR SITUASIONAL PASCA-TP (WAJIB DIPATUHI):
           ? chartStructure.resistances
               .map(
                 (r) =>
-                  `  * ${r.label}: ${r.price.toFixed(2)} (jarak +${r.distanceUsd.toFixed(
-                    2
-                  )} USD / ${r.distanceAtr} ATR di atas harga sekarang)`
+                  `  * ${r.label}: ${r.price.toFixed(dec)} (jarak +${r.distanceUsd.toFixed(
+                    dec
+                  )} ${symMeta.unitLabel} / ${r.distanceAtr} ATR di atas harga sekarang)`
               )
               .join('\n')
           : '  * Belum ada cluster Resistance terdekat di atas harga saat ini (area blue-sky / breakout baru).';
@@ -4203,9 +4518,9 @@ ATURAN BERPIKIR SITUASIONAL PASCA-TP (WAJIB DIPATUHI):
           ? chartStructure.supports
               .map(
                 (s) =>
-                  `  * ${s.label}: ${s.price.toFixed(2)} (jarak -${s.distanceUsd.toFixed(
-                    2
-                  )} USD / ${s.distanceAtr} ATR di bawah harga sekarang)`
+                  `  * ${s.label}: ${s.price.toFixed(dec)} (jarak -${s.distanceUsd.toFixed(
+                    dec
+                  )} ${symMeta.unitLabel} / ${s.distanceAtr} ATR di bawah harga sekarang)`
               )
               .join('\n')
           : '  * Belum ada cluster Support terdekat di bawah harga saat ini (area breakdown baru).';
@@ -4213,26 +4528,30 @@ ATURAN BERPIKIR SITUASIONAL PASCA-TP (WAJIB DIPATUHI):
       const fvgLines =
         chartStructure.fvgZones.length > 0
           ? chartStructure.fvgZones
-              .map((f) => `${f.type} [${f.low.toFixed(2)} - ${f.high.toFixed(2)}]`)
+              .map((f) => `${f.type} [${f.low.toFixed(dec)} - ${f.high.toFixed(dec)}]`)
               .join(' | ')
           : 'Tidak ada FVG aktif terdekat';
 
       const fiboLine = ind.fibonacci
         ? `Trend ${ind.fibonacci.trend} (${ind.fibonacci.swingLow.toFixed(
-            2
-          )}-${ind.fibonacci.swingHigh.toFixed(2)}) | 38.2%=${ind.fibonacci.r382} | 50%=${
+            dec
+          )}-${ind.fibonacci.swingHigh.toFixed(dec)}) | 38.2%=${ind.fibonacci.r382} | 50%=${
             ind.fibonacci.r500
           } | 61.8%=${ind.fibonacci.r618} | 78.6%=${ind.fibonacci.r786} | Ext 127.2%=${
             ind.fibonacci.ext1272
           } | Ext 161.8%=${ind.fibonacci.ext1618}`
         : 'N/A';
 
+      const macroPairNote =
+        activeSymbol === 'BTC/USD'
+          ? 'Sentimen Risk-On Kripto & Likuiditas USD'
+          : `Korelasi Invers ${activeSymbol} terhadap USD`;
       const macroLines = [
         `DXY (DX-Y.NYB): ${macroContext.dxyPrice ?? 'N/A'} (${
           macroContext.dxyChangePct !== null
             ? `${macroContext.dxyChangePct >= 0 ? '+' : ''}${macroContext.dxyChangePct}%`
             : 'N/A'
-        }) -> ${macroContext.dxyBias} (Korelasi Invers XAU/USD)`,
+        }) -> ${macroContext.dxyBias} (${macroPairNote})`,
         `US 10Y Yield (^TNX): ${macroContext.us10yYield ?? 'N/A'}% (${
           macroContext.us10yChangePct !== null
             ? `${macroContext.us10yChangePct >= 0 ? '+' : ''}${macroContext.us10yChangePct}%`
@@ -4256,9 +4575,9 @@ ATURAN BERPIKIR SITUASIONAL PASCA-TP (WAJIB DIPATUHI):
 ${recentClosedList
   .map(
     (t, idx) =>
-      `  * Trade #${idx + 1}: ${t.side} @ ${t.entryPrice.toFixed(2)} -> ${
+      `  * Trade #${idx + 1}: ${t.side} @ ${t.entryPrice.toFixed(dec)} -> ${
         t.closeReason
-      } @ ${t.closePrice.toFixed(2)} (${t.pnlUsd >= 0 ? '+' : '-'}$${Math.abs(
+      } @ ${t.closePrice.toFixed(dec)} (${t.pnlUsd >= 0 ? '+' : '-'}$${Math.abs(
         t.pnlUsd
       ).toFixed(2)}, ${t.closedMinutesAgo}m lalu)`
   )
@@ -4281,7 +4600,7 @@ ${
 ${resistanceLines}
 - Level SUPPORT (Lantai / Demand di bawah harga):
 ${supportLines}
-- Level Kunci Tambahan: Pivot Point=${chartStructure.pivotPoint ?? 'N/A'} | Session High=${chartStructure.sessionHigh.toFixed(2)} | Session Low=${chartStructure.sessionLow.toFixed(2)} | Angka Psikologis: ${chartStructure.roundLevels.join(', ')}
+- Level Kunci Tambahan: Pivot Point=${chartStructure.pivotPoint ?? 'N/A'} | Session High=${chartStructure.sessionHigh.toFixed(dec)} | Session Low=${chartStructure.sessionLow.toFixed(dec)} | Angka Psikologis: ${chartStructure.roundLevels.join(', ')}
 - Fibonacci Retracement & Extension: ${fiboLine}
 - Harmonic Pattern Trading (X-A-B-C-D): ${harmonicLine}
 - Pola Chart Makro Terdeteksi (20-50 candle): ${
@@ -4319,20 +4638,20 @@ ATURAN MEMBACA PETA HARGA & S/R:
 
         // 1. Sniper Compression Breakout (M1 + M5)
         let p1Vote: PillarVote = 'NEUTRAL';
-        let p1Detail = `Range 6-bar ${prev6Range.toFixed(2)} USD belum breakout bersih`;
+        let p1Detail = `Range 6-bar ${prev6Range.toFixed(dec)} ${symMeta.unitLabel} belum breakout bersih`;
         const nowBody = Math.abs(cNow.close - cNow.open);
-        const nowRange = Math.max(0.01, cNow.high - cNow.low);
+        const nowRange = Math.max(symMeta.minMove * 5, cNow.high - cNow.low);
         const m1MicroList = Array.isArray(body.mt5M1Candles) ? body.mt5M1Candles.slice(-3) : [];
         const m1BullCount = m1MicroList.filter((m) => m.close > m.open).length;
         const m1BearCount = m1MicroList.filter((m) => m.close < m.open).length;
         if (cNow.close > prev6High && nowBody / nowRange >= 0.45 && (m1MicroList.length === 0 || m1BullCount >= 2)) {
           p1Vote = 'BUY';
-          p1Detail = `Breakout atas range 6-bar (${prev6High.toFixed(2)}) terkonfirmasi body ${Math.round((nowBody / nowRange) * 100)}%`;
+          p1Detail = `Breakout atas range 6-bar (${prev6High.toFixed(dec)}) terkonfirmasi body ${Math.round((nowBody / nowRange) * 100)}%`;
         } else if (cNow.close < prev6Low && nowBody / nowRange >= 0.45 && (m1MicroList.length === 0 || m1BearCount >= 2)) {
           p1Vote = 'SELL';
-          p1Detail = `Breakdown bawah range 6-bar (${prev6Low.toFixed(2)}) terkonfirmasi body ${Math.round((nowBody / nowRange) * 100)}%`;
+          p1Detail = `Breakdown bawah range 6-bar (${prev6Low.toFixed(dec)}) terkonfirmasi body ${Math.round((nowBody / nowRange) * 100)}%`;
         } else if (prev6Range <= atrValue * 1.35) {
-          p1Detail = `Kompresi ketat (${prev6Range.toFixed(2)} USD <= 1.35 ATR) — siap tunggu breakout`;
+          p1Detail = `Kompresi ketat (${prev6Range.toFixed(dec)} ${symMeta.unitLabel} <= 1.35 ATR) — siap tunggu breakout`;
         }
 
         // 2. Momentum Pullback (EMA 9/21/50 + Tight ATR)
@@ -4366,10 +4685,10 @@ ATURAN MEMBACA PETA HARGA & S/R:
           (cPrev.high > prev6High && cPrev.close < prev6High && uwPrev > Math.abs(cPrev.close - cPrev.open) * 1.2);
         if (bullSweep && !bearSweep) {
           p3Vote = 'BUY';
-          p3Detail = `Bullish Liquidity Sweep di bawah ${prev6Low.toFixed(2)} + rejection wick`;
+          p3Detail = `Bullish Liquidity Sweep di bawah ${prev6Low.toFixed(dec)} + rejection wick`;
         } else if (bearSweep && !bullSweep) {
           p3Vote = 'SELL';
-          p3Detail = `Bearish Liquidity Sweep di atas ${prev6High.toFixed(2)} + rejection wick`;
+          p3Detail = `Bearish Liquidity Sweep di atas ${prev6High.toFixed(dec)} + rejection wick`;
         } else if (chartStructure.marketStructure === 'UPTREND_HH_HL') {
           p3Vote = 'BUY';
           p3Detail = 'Struktur SMC UPTREND_HH_HL menjaga aliran likuiditas naik';
@@ -4387,14 +4706,14 @@ ATURAN MEMBACA PETA HARGA & S/R:
         const sellBlockedBySup = Boolean(nearS && nearS.distanceAtr < 0.35);
         if (nearS && nearS.distanceAtr <= 0.55 && cNow.close >= cNow.open && !buyBlockedByRes) {
           p4Vote = 'BUY';
-          p4Detail = `Pantulan dekat Support ${nearS.price.toFixed(2)} (${nearS.distanceAtr} ATR), ruang ke R1 aman`;
+          p4Detail = `Pantulan dekat Support ${nearS.price.toFixed(dec)} (${nearS.distanceAtr} ATR), ruang ke R1 aman`;
         } else if (nearR && nearR.distanceAtr <= 0.55 && cNow.close <= cNow.open && !sellBlockedBySup) {
           p4Vote = 'SELL';
-          p4Detail = `Penolakan dekat Resistance ${nearR.price.toFixed(2)} (${nearR.distanceAtr} ATR), ruang ke S1 aman`;
+          p4Detail = `Penolakan dekat Resistance ${nearR.price.toFixed(dec)} (${nearR.distanceAtr} ATR), ruang ke S1 aman`;
         } else if (buyBlockedByRes || sellBlockedBySup) {
           p4Detail = buyBlockedByRes
-            ? `Waspada atap Resistance dekat (${nearR!.price.toFixed(2)}, ${nearR!.distanceAtr} ATR)`
-            : `Waspada lantai Support dekat (${nearS!.price.toFixed(2)}, ${nearS!.distanceAtr} ATR)`;
+            ? `Waspada atap Resistance dekat (${nearR!.price.toFixed(dec)}, ${nearR!.distanceAtr} ATR)`
+            : `Waspada lantai Support dekat (${nearS!.price.toFixed(dec)}, ${nearS!.distanceAtr} ATR)`;
         }
 
         // 5. Fair Value Gap (FVG) / Imbalance Scalp
@@ -4405,7 +4724,7 @@ ATURAN MEMBACA PETA HARGA & S/R:
         );
         if (nearFvg) {
           p5Vote = nearFvg.type === 'BULLISH_FVG' ? 'BUY' : 'SELL';
-          p5Detail = `Retest ${nearFvg.type} [${nearFvg.low.toFixed(2)}-${nearFvg.high.toFixed(2)}]`;
+          p5Detail = `Retest ${nearFvg.type} [${nearFvg.low.toFixed(dec)}-${nearFvg.high.toFixed(dec)}]`;
         }
 
         // 6. Fibonacci Micro-Retracement & Extension
@@ -4429,31 +4748,52 @@ ATURAN MEMBACA PETA HARGA & S/R:
         const bullVol = last3.reduce((s, c) => s + (c.close >= c.open ? c.volume : 0), 0);
         const bearVol = last3.reduce((s, c) => s + (c.close < c.open ? c.volume : 0), 0);
         const fbOrderBias = fastBullPosition.available ? fastBullPosition.orderBookBias : 'NEUTRAL';
+        const bookName = activeSymbol === 'BTC/USD' ? 'Binance Depth' : 'FastBull OrderBook';
         if (ind.obvTrend === 'ACCUMULATION' && bullVol >= bearVol && fbOrderBias !== 'SELL') {
           p7Vote = 'BUY';
-          p7Detail = `OBV ACCUMULATION + volume buyer (${bullVol} vs ${bearVol}) + FastBull OrderBook=${fbOrderBias}`;
+          p7Detail = `OBV ACCUMULATION + volume buyer (${bullVol} vs ${bearVol}) + ${bookName}=${fbOrderBias}`;
         } else if (ind.obvTrend === 'DISTRIBUTION' && bearVol >= bullVol && fbOrderBias !== 'BUY') {
           p7Vote = 'SELL';
-          p7Detail = `OBV DISTRIBUTION + volume seller (${bearVol} vs ${bullVol}) + FastBull OrderBook=${fbOrderBias}`;
+          p7Detail = `OBV DISTRIBUTION + volume seller (${bearVol} vs ${bullVol}) + ${bookName}=${fbOrderBias}`;
         } else if (fbOrderBias !== 'NEUTRAL') {
-          p7Detail = `OBV=${ind.obvTrend} bertolak belakang/netral vs FastBull OrderBook=${fbOrderBias}`;
+          p7Detail = `OBV=${ind.obvTrend} bertolak belakang/netral vs ${bookName}=${fbOrderBias}`;
         }
 
-        // 8. Session Open & DXY Inverse-Correlation Scalp
+        // 8. Session Open & DXY / Macro Correlation Scalp
         let p8Vote: PillarVote = 'NEUTRAL';
         const utcHour = new Date().getUTCHours();
         const sessionLabel =
-          utcHour >= 12 && utcHour <= 16
+          activeSymbol === 'BTC/USD'
+            ? utcHour >= 13 && utcHour <= 20
+              ? 'US Equity/ETF Overlap (Likuiditas Puncak)'
+              : utcHour >= 7 && utcHour < 13
+              ? 'Sesi Eropa'
+              : 'Sesi Asia (24/7 Kripto)'
+            : utcHour >= 12 && utcHour <= 16
             ? 'London/NY Overlap (Likuiditas Puncak)'
             : utcHour >= 7 && utcHour < 12
             ? 'Sesi London'
             : utcHour > 16 && utcHour <= 21
             ? 'Sesi New York'
             : 'Sesi Asia (Range)';
-        if (macroContext.dxyBias === 'MELEMAH') {
-          p8Vote = 'BUY';
-        } else if (macroContext.dxyBias === 'MENGUAT') {
-          p8Vote = 'SELL';
+        if (activeSymbol === 'BTC/USD') {
+          if (
+            macroContext.dxyBias === 'MELEMAH' ||
+            (macroContext.sp500ChangePct !== null && macroContext.sp500ChangePct >= 0.25)
+          ) {
+            p8Vote = 'BUY';
+          } else if (
+            macroContext.dxyBias === 'MENGUAT' &&
+            (macroContext.sp500ChangePct === null || macroContext.sp500ChangePct <= 0)
+          ) {
+            p8Vote = 'SELL';
+          }
+        } else {
+          if (macroContext.dxyBias === 'MELEMAH') {
+            p8Vote = 'BUY';
+          } else if (macroContext.dxyBias === 'MENGUAT') {
+            p8Vote = 'SELL';
+          }
         }
         const p8Detail = `${sessionLabel} | DXY ${macroContext.dxyBias} (${macroContext.dxyChangePct ?? 'N/A'}%)`;
 
@@ -4476,10 +4816,11 @@ ATURAN MEMBACA PETA HARGA & S/R:
 
         // 10. Probabilitas Sekuens LSTM Kuantitatif (Kalibrasi Sekuens + Order Flow)
         let p10Vote: PillarVote = 'NEUTRAL';
+        const atrDenom = Math.max(symMeta.minSlDistance * 0.5, atrValue);
         const seqSlopeUp =
-          (cNow.close - candles[Math.max(0, n - 6)].close) / Math.max(0.2, atrValue);
+          (cNow.close - candles[Math.max(0, n - 6)].close) / atrDenom;
         const seqSlope12 =
-          (cNow.close - candles[Math.max(0, n - 13)].close) / Math.max(0.2, atrValue);
+          (cNow.close - candles[Math.max(0, n - 13)].close) / atrDenom;
         let seqUp = 33;
         let seqDown = 33;
         if (seqSlopeUp > 0.35 && seqSlope12 > 0 && p7Vote !== 'SELL') {
@@ -4562,10 +4903,10 @@ ATURAN MEMBACA PETA HARGA & S/R:
       const adaptivePromptRule =
         strategyFocus === 'UNIFIED_8IN1'
           ? `\nDOKTRIN WAJIB ULTRA-SCALPING (TANPA SWING / TANPA INTRADAY) + PROTOKOL SINKRONISASI GANDA + MODE "PREDATORY SURVEILLANCE & PREDATORY STANDBY":
-- TUJUAN TUNGGAL: Anda beroperasi EXCLUSIVELY untuk ULTRA-SCALPING XAU/USD (fokus eksekusi 90 detik ke depan, target TP1 cepat & realistis ≤ 5–30 menit). DILARANG KERAS mengambil setup atau memasang target jauh bergaya SWING maupun INTRADAY.
-- PROTOKOL SINKRONISASI GANDA: Selalu ekstrak Bid/Ask & sumbu-Y secara visual (OCR), verifikasi dengan Konsensus Harga Global Real-Time (${globalSync.consensusMid}), dan selaraskan selisih spread sebelum menetapkan entry & TP1 ultra-scalp.
+- TUJUAN TUNGGAL: Anda beroperasi EXCLUSIVELY untuk ULTRA-SCALPING ${activeSymbol} (fokus eksekusi 90 detik ke depan, target TP1 cepat & realistis ≤ 5–30 menit). DILARANG KERAS mengambil setup atau memasang target jauh bergaya SWING maupun INTRADAY.
+- PROTOKOL SINKRONISASI GANDA: Selalu ekstrak Bid/Ask & sumbu-Y secara visual (OCR), verifikasi dengan Konsensus Harga Global Real-Time (${globalSync.consensusMid.toFixed(dec)}), dan selaraskan selisih spread sebelum menetapkan entry & TP1 ultra-scalp.
 - MODE "PREDATORY SURVEILLANCE & PREDATORY STANDBY":
-  * Predatory Surveillance: Mengintai jejak Smart Money, liquidity sweep, DXY invers, urutan candle kiri-ke-kanan M1+M5, Harmonic PRZ, dan Order Flow secara senyap & teliti.
+  * Predatory Surveillance: Mengintai jejak Smart Money, liquidity sweep, korelasi DXY, urutan candle kiri-ke-kanan M1+M5, Harmonic PRZ, dan Order Flow secara senyap & teliti.
   * Predatory Standby: Siaga penuh menahan posisi ("HOLD") bila konfluensi 11 pilar belum matang sempurna, dan hanya menerkam ("BUY"/"SELL") pada titik presisi ultra-scalping bebas hambatan S/R.
 
 MATRIKS PIPELINE TERPADU 11 PILAR COMPLETE (8-IN-1 + HARMONIC, AI LSTM & PRICE ACTION):
@@ -4580,17 +4921,23 @@ ATURAN EKSEKUSI 11 PILAR ULTRA-SCALPING:
           ? `\nATURAN GABUNGAN AUTO ADAPTIVE (TARGET WINRATE ≥90% & PROFITABLE):\n- Anda menggabungkan 2 engine: (A) [Momentum M5] EMA 9/21/50 + Tight ATR, dan (B) [Sniper M1+M5] Ultra-Scalping Sniper Breakout. Pilih otomatis mode yang paling cocok dengan kondisi pasar saat ini.\n- Gunakan [Momentum M5] saat tren bersih (EMA 9/21/50 searah & slope jelas, ADX mendukung, pullback sehat ke EMA9/21).\n- Gunakan [Sniper M1+M5] saat terjadi breakout kompresi / liquidity sweep dengan konfirmasi micro candle & penolakan S/R kunci.\n- WAJIB disiplin target Winrate ≥90%: hanya keluarkan BUY/SELL jika konfluensi sangat solid dan jalur ke TP1 bebas dari tembok S/R penghalang; jika choppy/meragukan, WAJIB jawab HOLD.\n- Sebutkan pilihan mode ([Momentum M5] atau [Sniper M1+M5]) secara eksplisit di setupPattern dan judgeVerdict.`
           : '';
 
-      const promptText = `Anda adalah TRADER & HAKIM KEPUTUSAN AI MANDIRI (100% Autonomous AI Sovereign Decision Maker) untuk XAU/USD.${adaptivePromptRule}
+      const promptText = `Anda adalah TRADER & HAKIM KEPUTUSAN AI MANDIRI (100% Autonomous AI Sovereign Decision Maker) untuk ${activeSymbol}.${adaptivePromptRule}
 PRINSIP KERJA WAJIB AI:
 1. PENGLIHATAN OPTIK OTOMATIS DARI LIVE CHART (OCR & COMPUTER VISION) + SINKRONISASI GANDA:
    - Baca gambar visual live chart yang diambil otomatis (panel Bid/Ask, garis S1/R1, struktur candlestick, dan label harga sumbu-Y), lalu selaraskan dengan Konsensus Harga Global Real-Time di bawah!
    - Protokol Sinkronisasi Global Saat Ini: ${globalSync.summary}
-2. CEK REAL-TIME ORDER & POSITION BOOK FASTBULL (https://www.fastbull.com/list-position — PAIR XAUUSD):
+2. CEK REAL-TIME ORDER & POSITION BOOK (${
+        activeSymbol === 'BTC/USD'
+          ? 'BINANCE BTCUSDT ORDERBOOK'
+          : `https://www.fastbull.com/list-position — PAIR ${symMeta.mt5Symbol}`
+      }):
 ${fastBullPosition.promptBlock}
-   - WAJIB periksa rasio Open Positions (Long vs Short), klaster Buy Limit / Sell Limit (tembok Support/Resistance orderbook), dan klaster Buy Stop / Sell Stop (zona likuiditas / potensi stop-hunt) di atas agar tidak salah perkiraan atau terjebak di kerumunan ritel yang berlawanan dengan Smart Money!
+   - WAJIB periksa rasio Open Positions / Orderbook (Long vs Short), klaster Buy Limit / Sell Limit (tembok Support/Resistance orderbook), dan klaster Buy Stop / Sell Stop (zona likuiditas / potensi stop-hunt) di atas agar tidak salah perkiraan atau terjebak di kerumunan ritel yang berlawanan dengan Smart Money!
 3. FUNDAMENTAL HARIAN, DXY, SAHAM & GEOPOLITIK REAL-TIME:
 ${macroLines}
-   - Selaraskan analisa teknikal dengan arah DXY (korelasi invers), Yield US10Y, S&P 500, dan berita geopolitik di atas.
+   - Selaraskan analisa teknikal dengan arah DXY (${
+     activeSymbol === 'BTC/USD' ? 'sentimen likuiditas USD & risk appetite' : 'korelasi invers terhadap USD'
+   }), Yield US10Y, S&P 500, dan berita geopolitik di atas.
 4. SELF-AUDIT KESALAHAN TERDAHULU & KEJUJURAN DATA (ANTI-INFLASI CONFIDENCE):
    - DILARANG KERAS memberikan angka keyakinan palsu (95%–100% atau 98%) jika pasar sedang ranging, ADX < 20, multi-timeframe bentrok, atau belum ada konfirmasi struktur yang solid.
    - Jika tidak ada konfirmasi kuat, JUJUR keluarkan "HOLD" dengan skor keyakinan realistis (40–68%).
@@ -4598,10 +4945,10 @@ ${macroLines}
 ${mtfData.promptBlock}
 
 DATA HARGA PASAR REAL-TIME (UTAMA):
-- Pair: XAU/USD (Timeframe Utama: ${tfLabel}${m1Section ? ' + M1 Micro' : ''})
+- Pair: ${activeSymbol} (Presisi ${dec} desimal | Timeframe Utama: ${tfLabel}${m1Section ? ' + M1 Micro' : ''})
 - Sumber Feed Utama: ${snapshot.quote.source}
-- Bid: ${snapshot.quote.bid} | Ask: ${snapshot.quote.ask} | Mid: ${snapshot.quote.mid} | Spread: ${spreadInfo}
-- High 24h: ${snapshot.quote.high24h} | Low 24h: ${snapshot.quote.low24h}
+- Bid: ${snapshot.quote.bid.toFixed(dec)} | Ask: ${snapshot.quote.ask.toFixed(dec)} | Mid: ${snapshot.quote.mid.toFixed(dec)} | Spread: ${spreadInfo}
+- High 24h: ${snapshot.quote.high24h.toFixed(dec)} | Low 24h: ${snapshot.quote.low24h.toFixed(dec)}
 - Sisa waktu penutupan candle ${tfLabel} aktif: ${snapshot.quote.candleCloseInSec} detik
 
 ${structureSection}
@@ -4613,15 +4960,15 @@ ANALISA POLA SEKUENSIAL & ORDER FLOW (${snapshot.candles.length} CANDLE):
 ${deepLearningTelemetry}
 
 INDIKATOR TEKNIKAL (PENUNJANG KONFLUENSI — BUKAN PENENTU TUNGGAL):
-- EMA 9: ${ind.ema9 ?? 'N/A'} (Slope 3-bar: ${ema9Slope !== null ? `${ema9Slope >= 0 ? '+' : ''}${ema9Slope}` : 'N/A'})
-- EMA 21: ${ind.ema21 ?? 'N/A'} (Gap EMA9-EMA21: ${emaGap !== null ? `${emaGap >= 0 ? '+' : ''}${emaGap}` : 'N/A'})
+- EMA 9: ${ind.ema9 ?? 'N/A'} (Slope 3-bar: ${ema9Slope !== null ? `${ema9Slope >= 0 ? '+' : ''}${ema9Slope.toFixed(dec)}` : 'N/A'})
+- EMA 21: ${ind.ema21 ?? 'N/A'} (Gap EMA9-EMA21: ${emaGap !== null ? `${emaGap >= 0 ? '+' : ''}${emaGap.toFixed(dec)}` : 'N/A'})
 - EMA 50: ${ind.ema50 ?? 'N/A'} | EMA 200: ${ind.ema200 ?? 'N/A'}
 - RSI (14): ${ind.rsi14 ?? 'N/A'} | Stochastic (14,3,3): %K=${ind.stochastic?.k ?? 'N/A'}, %D=${ind.stochastic?.d ?? 'N/A'}
 - ADX (14): ${ind.adx14 ?? 'N/A'} (>20 trend kuat, <20 ranging) | OBV Volume Trend: ${ind.obvTrend ?? 'NEUTRAL'}
 - MACD (12,26,9): Line=${ind.macd.line ?? 'N/A'}, Signal=${ind.macd.signal ?? 'N/A'}, Hist=${ind.macd.histogram ?? 'N/A'}
-- ATR (14): ${atrValue} USD (Info volatilitas saja — opsi jarak referensi: SL ~$${slGuide}, TP1 ~$${tpGuide})
+- ATR (14): ${atrValue.toFixed(dec)} ${symMeta.unitLabel} (Info volatilitas saja — opsi jarak referensi: SL ~${slGuide}, TP1 ~${tpGuide})
 - Bollinger Bands (20,2): Upper=${ind.bollinger.upper ?? 'N/A'}, Mid=${ind.bollinger.middle ?? 'N/A'}, Lower=${ind.bollinger.lower ?? 'N/A'}
-- Swing High (30 candle): ${ind.swingHigh} | Swing Low (30 candle): ${ind.swingLow}
+- Swing High (30 candle): ${ind.swingHigh.toFixed(dec)} | Swing Low (30 candle): ${ind.swingLow.toFixed(dec)}
 
 KONTEKS AKUN & GAYA EKSEKUSI:
 - Preferensi Gaya Trader: ${strategyFocus} (${strategyInstructionMap[strategyFocus] || strategyInstructionMap.ADAPTIVE_SCALP})
@@ -4634,11 +4981,11 @@ ${positionMonitorInstruction}
 ${postTpInstruction}
 
 TUGAS KEPUTUSAN MANDIRI AI:
-1. Lakukan OCR/Computer Vision terhadap gambar live chart yang dikirim (baca label Bid/Ask, S1/R1, & sumbu-Y) dan sinkronkan dengan harga Konsensus Global (${globalSync.consensusMid}).
+1. Lakukan OCR/Computer Vision terhadap gambar live chart yang dikirim (baca label Bid/Ask, S1/R1, & sumbu-Y) dan sinkronkan dengan harga Konsensus Global (${globalSync.consensusMid.toFixed(dec)}).
 2. Baca Peta Support/Resistance, Fibonacci, Struktur MTF (M5–H4), Order Flow, serta DXY & Geopolitik sebelum memutuskan "BUY", "SELL", atau "HOLD".
 3. Terapkan KEJUJURAN DATA: jangan pernah memaksakan skor 90–98% jika struktur tidak terkonfirmasi penuh.
-4. Tentukan \`entryPrice\`, \`stopLoss\` (di balik level S/R / batas invalidasi struktur), \`takeProfit1\`, dan \`takeProfit2\` (BUY: stopLoss < entryPrice < takeProfit1 < takeProfit2; SELL: stopLoss > entryPrice > takeProfit1 > takeProfit2).
-5. Jika memilih "HOLD": isi entryPrice dengan harga mid saat ini (${snapshot.quote.mid}).
+4. Tentukan \`entryPrice\`, \`stopLoss\` (di balik level S/R / batas invalidasi struktur), \`takeProfit1\`, dan \`takeProfit2\` dengan presisi ${dec} desimal (BUY: stopLoss < entryPrice < takeProfit1 < takeProfit2; SELL: stopLoss > entryPrice > takeProfit1 > takeProfit2).
+5. Jika memilih "HOLD": isi entryPrice dengan harga mid saat ini (${snapshot.quote.mid.toFixed(dec)}).
 6. Isi \`ocrExtractedPrice\`, \`globalSyncSummary\`, \`macroSummary\`, \`mtfSummary\`, \`keyLevelsSummary\`, \`priceActionSignal\`, \`harmonicPattern\`, \`lstmProbability\` (perhitungan probabilitas LSTM mandiri Anda sebagai AI trader profesional: \`upPct\`, \`downPct\`, \`holdPct\`, \`horizonMinutes\`, \`rationale\`), \`postTpEvaluation\`, \`postTpReason\`, \`judgeVerdict\`, dan \`indicatorWeighting\` dalam Bahasa Indonesia berdasarkan FAKTA data di atas.`;
 
       const parts: Array<
@@ -4664,8 +5011,8 @@ TUGAS KEPUTUSAN MANDIRI AI:
       parts.push({ text: promptText });
 
       const systemInstruction = isUltraUnified
-        ? 'Anda adalah Trader Ultra-Scalping Profesional XAU/USD (KHUSUS ULTRA-SCALPING 90 detik–30 menit; BUKAN swing dan BUKAN intraday) yang beroperasi dalam Protokol Sinkronisasi Ganda dan mode "Predatory Surveillance & Predatory Standby". Anda WAJIB membaca visual live chart (OCR Bid/Ask & sumbu-Y), menyelaraskan dengan Konsensus Harga Global, mengecek data real-time FastBull list-position (XAUUSD Open Positions & Pending Order clusters) agar tidak salah perkiraan/terjebak stop-hunt, memeriksa DXY & berita geopolitik real-time, memetakan S/R + Price Action murni + Harmonic Pattern + 11 Pilar Complete, menghitung Probabilitas LSTM mandiri (horizon 5-15m), mengaudit trade rugi agar tidak terulang, dan DILARANG menggelembungkan confidence (95-98%) bila konfirmasi belum valid—tahan HOLD dalam mode Predatory Standby sampai setup ultra-scalping matang sempurna.'
-        : 'Anda adalah Analis & Hakim Keputusan AI Profesional untuk XAU/USD yang jujur terhadap data. Anda WAJIB membaca visual live chart secara otomatis (OCR Bid/Ask & sumbu-Y), menyelaraskan dengan Konsensus Harga Global, mengecek data real-time FastBull list-position (XAUUSD Open Positions & Pending Orders) agar tidak salah perkiraan, memeriksa DXY & berita geopolitik real-time, memetakan S/R + Fibonacci + MTF (M5-H4) dari kiri ke kanan, mengaudit riwayat trade rugi agar tidak terulang, dan DILARANG menggelembungkan confidence (95-98%) bila struktur belum terkonfirmasi penuh. Saat pasca-TP, jangan membuka posisi balik arah spontan tanpa konfirmasi struktur.';
+        ? `Anda adalah Trader Ultra-Scalping Profesional ${activeSymbol} (KHUSUS ULTRA-SCALPING 90 detik–30 menit; BUKAN swing dan BUKAN intraday) yang beroperasi dalam Protokol Sinkronisasi Ganda dan mode "Predatory Surveillance & Predatory Standby". Anda WAJIB membaca visual live chart (OCR Bid/Ask & sumbu-Y), menyelaraskan dengan Konsensus Harga Global, mengecek data real-time Order & Position Book (${symMeta.mt5Symbol}) agar tidak salah perkiraan/terjebak stop-hunt, memeriksa DXY & berita geopolitik real-time, memetakan S/R + Price Action murni + Harmonic Pattern + 11 Pilar Complete, menghitung Probabilitas LSTM mandiri (horizon 5-15m), mengaudit trade rugi agar tidak terulang, dan DILARANG menggelembungkan confidence (95-98%) bila konfirmasi belum valid—tahan HOLD dalam mode Predatory Standby sampai setup ultra-scalping matang sempurna.`
+        : `Anda adalah Analis & Hakim Keputusan AI Profesional untuk ${activeSymbol} yang jujur terhadap data. Anda WAJIB membaca visual live chart secara otomatis (OCR Bid/Ask & sumbu-Y), menyelaraskan dengan Konsensus Harga Global, mengecek data real-time Order & Position Book (${symMeta.mt5Symbol}) agar tidak salah perkiraan, memeriksa DXY & berita geopolitik real-time, memetakan S/R + Fibonacci + MTF (M5-H4) dari kiri ke kanan, mengaudit riwayat trade rugi agar tidak terulang, dan DILARANG menggelembungkan confidence (95-98%) bila struktur belum terkonfirmasi penuh. Saat pasca-TP, jangan membuka posisi balik arah spontan tanpa konfirmasi struktur.`;
 
       let rawText = '';
       let activeModelName = thinkingHigh ? 'gemini-4-hydrogen (Thinking High)' : 'gemini-4-hydrogen';
@@ -5022,16 +5369,27 @@ TUGAS KEPUTUSAN MANDIRI AI:
       const buildCompactChatPrompt = () => {
         const last6 = snapshot.candles
           .slice(-6)
-          .map((c) => `${c.open}/${c.high}/${c.low}/${c.close}`)
+          .map(
+            (c) =>
+              `${c.open.toFixed(dec)}/${c.high.toFixed(dec)}/${c.low.toFixed(dec)}/${c.close.toFixed(
+                dec
+              )}`
+          )
           .join(' | ');
-        const sup = chartStructure.nearestSupport?.price.toFixed(2) ?? 'N/A';
-        const res = chartStructure.nearestResistance?.price.toFixed(2) ?? 'N/A';
+        const sup = chartStructure.nearestSupport?.price.toFixed(dec) ?? 'N/A';
+        const res = chartStructure.nearestResistance?.price.toFixed(dec) ?? 'N/A';
         return [
-          `XAU/USD ${tfLabel} | Strategy: ${strategyFocus} | Bid=${snapshot.quote.bid} Ask=${snapshot.quote.ask} Mid=${snapshot.quote.mid}`,
-          `Structure: ${chartStructure.marketStructure} | S1=${sup} | R1=${res} | ATR=${atrValue}`,
+          `${activeSymbol} ${tfLabel} | Strategy: ${strategyFocus} | Bid=${snapshot.quote.bid.toFixed(
+            dec
+          )} Ask=${snapshot.quote.ask.toFixed(dec)} Mid=${snapshot.quote.mid.toFixed(dec)}`,
+          `Structure: ${chartStructure.marketStructure} | S1=${sup} | R1=${res} | ATR=${atrValue.toFixed(
+            dec
+          )}`,
           `EMA9=${ind.ema9 ?? 'N/A'} EMA21=${ind.ema21 ?? 'N/A'} EMA50=${ind.ema50 ?? 'N/A'} RSI14=${ind.rsi14 ?? 'N/A'} ADX14=${ind.adx14 ?? 'N/A'}`,
-          `DXY Bias=${macroContext.dxyBias} (${macroContext.dxyChangePct ?? 'N/A'}%) | GlobalMid=${globalSync.consensusMid}`,
-          `FastBull list-position XAUUSD: ${fastBullPosition.summary}`,
+          `DXY Bias=${macroContext.dxyBias} (${macroContext.dxyChangePct ?? 'N/A'}%) | GlobalMid=${globalSync.consensusMid.toFixed(
+            dec
+          )}`,
+          `Order/Position Book ${symMeta.mt5Symbol}: ${fastBullPosition.summary}`,
           ...(chartStructure.harmonicPattern
             ? [
                 `Harmonic=${chartStructure.harmonicPattern.direction} ${chartStructure.harmonicPattern.name} (${chartStructure.harmonicPattern.status}) PRZ ${chartStructure.harmonicPattern.przLow}-${chartStructure.harmonicPattern.przHigh}`,
@@ -5045,7 +5403,7 @@ TUGAS KEPUTUSAN MANDIRI AI:
             : []),
           `Last 6 OHLC: ${last6}`,
           `OpenPositions=${openPositionsCount}${openDetailLines ? `\n${openDetailLines}` : ''}`,
-          `Decide BUY, SELL, or HOLD honestly (if ranging/choppy or ADX<20 or near S/R barrier, stay Predatory Standby HOLD with 50-68% confidence). Calculate your own independent lstmProbability (upPct+downPct+holdPct=100, ultra-scalp horizonMinutes 5-15), evaluate priceActionSignal and harmonicPattern. Set tight ultra-scalping entryPrice, stopLoss, takeProfit1, takeProfit2.`,
+          `Decide BUY, SELL, or HOLD honestly (if ranging/choppy or ADX<20 or near S/R barrier, stay Predatory Standby HOLD with 50-68% confidence). Calculate your own independent lstmProbability (upPct+downPct+holdPct=100, ultra-scalp horizonMinutes 5-15), evaluate priceActionSignal and harmonicPattern. Set tight ultra-scalping entryPrice, stopLoss, takeProfit1, takeProfit2 (${dec} decimals).`,
         ].join('\n');
       };
 
@@ -5063,6 +5421,7 @@ TUGAS KEPUTUSAN MANDIRI AI:
           compactPromptText: buildCompactChatPrompt(),
           chartImageBase64: chartImageBase64Cleaned,
           thinkingHigh,
+          symbol: activeSymbol,
         });
       };
 
@@ -5367,9 +5726,9 @@ TUGAS KEPUTUSAN MANDIRI AI:
             postTpEvaluation:
               latestClosed && latestClosed.closedMinutesAgo <= 90 ? 'WAIT_PULLBACK_HOLD' : 'NONE',
             entryPrice: snapshot.quote.mid,
-            stopLoss: Number((snapshot.quote.mid - atrValue * 1.15).toFixed(2)),
-            takeProfit1: Number((snapshot.quote.mid + atrValue * 1.5).toFixed(2)),
-            takeProfit2: Number((snapshot.quote.mid + atrValue * 2.4).toFixed(2)),
+            stopLoss: Number((snapshot.quote.mid - atrValue * 1.15).toFixed(dec)),
+            takeProfit1: Number((snapshot.quote.mid + atrValue * 1.5).toFixed(dec)),
+            takeProfit2: Number((snapshot.quote.mid + atrValue * 2.4).toFixed(dec)),
             setupPattern: `HOLD — ${missingName} Offline (${missingReason})`,
             judgeVerdict: holdNote,
             indicatorWeighting: `Dual Konsensus Strict: ${availableName}=${soloSig} (${soloConf}%) | ${missingName}=${missingReason} -> HOLD`,
@@ -5431,6 +5790,9 @@ TUGAS KEPUTUSAN MANDIRI AI:
             ? snapshot.quote.bid
             : snapshot.quote.mid;
 
+        const minStep = Math.max(symMeta.minMove * 5, symMeta.minSlDistance * 0.4);
+        const tp2Step = Math.max(symMeta.minMove * 3, minStep * 0.65);
+
         const pickValidLevel = (
           valA: unknown,
           valB: unknown,
@@ -5441,10 +5803,10 @@ TUGAS KEPUTUSAN MANDIRI AI:
           const b = Number(valB);
           const aOk = Number.isFinite(a) && validator(a);
           const bOk = Number.isFinite(b) && validator(b);
-          if (aOk && bOk) return Number(((a + b) / 2).toFixed(2));
-          if (aOk) return Number(a.toFixed(2));
-          if (bOk) return Number(b.toFixed(2));
-          return Number(fallback.toFixed(2));
+          if (aOk && bOk) return Number(((a + b) / 2).toFixed(dec));
+          if (aOk) return Number(a.toFixed(dec));
+          if (bOk) return Number(b.toFixed(dec));
+          return Number(fallback.toFixed(dec));
         };
 
         let stopLoss = entryPrice - atrValue * 1.15;
@@ -5455,38 +5817,38 @@ TUGAS KEPUTUSAN MANDIRI AI:
           stopLoss = pickValidLevel(
             e.stopLoss,
             p.stopLoss,
-            (v) => v > entryPrice + 0.3,
+            (v) => v > entryPrice + minStep,
             entryPrice + atrValue * 1.15
           );
           takeProfit1 = pickValidLevel(
             e.takeProfit1,
             p.takeProfit1,
-            (v) => v < entryPrice - 0.3,
+            (v) => v < entryPrice - minStep,
             entryPrice - atrValue * 1.5
           );
           takeProfit2 = pickValidLevel(
             e.takeProfit2,
             p.takeProfit2,
-            (v) => v < takeProfit1 - 0.2,
+            (v) => v < takeProfit1 - tp2Step,
             takeProfit1 - atrValue * 0.9
           );
         } else {
           stopLoss = pickValidLevel(
             e.stopLoss,
             p.stopLoss,
-            (v) => v < entryPrice - 0.3,
+            (v) => v < entryPrice - minStep,
             entryPrice - atrValue * 1.15
           );
           takeProfit1 = pickValidLevel(
             e.takeProfit1,
             p.takeProfit1,
-            (v) => v > entryPrice + 0.3,
+            (v) => v > entryPrice + minStep,
             entryPrice + atrValue * 1.5
           );
           takeProfit2 = pickValidLevel(
             e.takeProfit2,
             p.takeProfit2,
-            (v) => v > takeProfit1 + 0.2,
+            (v) => v > takeProfit1 + tp2Step,
             takeProfit1 + atrValue * 0.9
           );
         }
@@ -5831,6 +6193,9 @@ TUGAS KEPUTUSAN MANDIRI AI:
             ? snapshot.quote.bid
             : snapshot.quote.mid;
 
+        const minStep = Math.max(symMeta.minMove * 5, symMeta.minSlDistance * 0.4);
+        const tp2Step = Math.max(symMeta.minMove * 3, minStep * 0.65);
+
         const avgValidLevel = (
           picker: (d: TripleParsedPayload) => unknown,
           validator: (v: number) => boolean,
@@ -5840,9 +6205,9 @@ TUGAS KEPUTUSAN MANDIRI AI:
             .map((v) => Number(picker(v.data)))
             .filter((n) => Number.isFinite(n) && validator(n));
           if (valid.length > 0) {
-            return Number((valid.reduce((a, b) => a + b, 0) / valid.length).toFixed(2));
+            return Number((valid.reduce((a, b) => a + b, 0) / valid.length).toFixed(dec));
           }
-          return Number(fallback.toFixed(2));
+          return Number(fallback.toFixed(dec));
         };
 
         let stopLoss = entryPrice - atrValue * 1.15;
@@ -5852,33 +6217,33 @@ TUGAS KEPUTUSAN MANDIRI AI:
         if (finalSignal === 'SELL') {
           stopLoss = avgValidLevel(
             (d) => d.stopLoss,
-            (v) => v > entryPrice + 0.3,
+            (v) => v > entryPrice + minStep,
             entryPrice + atrValue * 1.15
           );
           takeProfit1 = avgValidLevel(
             (d) => d.takeProfit1,
-            (v) => v < entryPrice - 0.3,
+            (v) => v < entryPrice - minStep,
             entryPrice - atrValue * 1.5
           );
           takeProfit2 = avgValidLevel(
             (d) => d.takeProfit2,
-            (v) => v < takeProfit1 - 0.2,
+            (v) => v < takeProfit1 - tp2Step,
             takeProfit1 - atrValue * 0.9
           );
         } else {
           stopLoss = avgValidLevel(
             (d) => d.stopLoss,
-            (v) => v < entryPrice - 0.3,
+            (v) => v < entryPrice - minStep,
             entryPrice - atrValue * 1.15
           );
           takeProfit1 = avgValidLevel(
             (d) => d.takeProfit1,
-            (v) => v > entryPrice + 0.3,
+            (v) => v > entryPrice + minStep,
             entryPrice + atrValue * 1.5
           );
           takeProfit2 = avgValidLevel(
             (d) => d.takeProfit2,
-            (v) => v > takeProfit1 + 0.2,
+            (v) => v > takeProfit1 + tp2Step,
             takeProfit1 + atrValue * 0.9
           );
         }
@@ -6533,7 +6898,7 @@ TUGAS KEPUTUSAN MANDIRI AI:
       // Mathematical sanity check so broker order stops / lot calculation references are never inverted
       const parsedEntry = Number(parsed.entryPrice);
       let entryPrice = Number(
-        (Number.isFinite(parsedEntry) && parsedEntry > 0 ? parsedEntry : refPrice).toFixed(2)
+        (Number.isFinite(parsedEntry) && parsedEntry > 0 ? parsedEntry : refPrice).toFixed(dec)
       );
       if (Math.abs(entryPrice - refPrice) > atrValue * 2.5) {
         entryPrice = refPrice;
@@ -6553,7 +6918,7 @@ TUGAS KEPUTUSAN MANDIRI AI:
           : normalizedSignal === 'SELL'
           ? entryPrice + atrValue * slMult
           : entryPrice - atrValue * slMult
-        ).toFixed(2)
+        ).toFixed(dec)
       );
       let takeProfit1 = Number(
         (Number.isFinite(parsedTp1) && parsedTp1 > 0
@@ -6561,7 +6926,7 @@ TUGAS KEPUTUSAN MANDIRI AI:
           : normalizedSignal === 'SELL'
           ? entryPrice - atrValue * tp1Mult
           : entryPrice + atrValue * tp1Mult
-        ).toFixed(2)
+        ).toFixed(dec)
       );
       let takeProfit2 = Number(
         (Number.isFinite(parsedTp2) && parsedTp2 > 0
@@ -6569,23 +6934,23 @@ TUGAS KEPUTUSAN MANDIRI AI:
           : normalizedSignal === 'SELL'
           ? entryPrice - atrValue * tp2Mult
           : entryPrice + atrValue * tp2Mult
-        ).toFixed(2)
+        ).toFixed(dec)
       );
 
       if (normalizedSignal === 'BUY') {
-        if (stopLoss >= entryPrice) stopLoss = Number((entryPrice - atrValue * slMult).toFixed(2));
-        if (takeProfit1 <= entryPrice) takeProfit1 = Number((entryPrice + atrValue * tp1Mult).toFixed(2));
+        if (stopLoss >= entryPrice) stopLoss = Number((entryPrice - atrValue * slMult).toFixed(dec));
+        if (takeProfit1 <= entryPrice) takeProfit1 = Number((entryPrice + atrValue * tp1Mult).toFixed(dec));
         if (isUltraUnified && takeProfit1 - entryPrice > atrValue * 1.95) {
-          takeProfit1 = Number((entryPrice + atrValue * tp1Mult).toFixed(2));
+          takeProfit1 = Number((entryPrice + atrValue * tp1Mult).toFixed(dec));
         }
-        if (takeProfit2 <= takeProfit1) takeProfit2 = Number((takeProfit1 + atrValue * 0.7).toFixed(2));
+        if (takeProfit2 <= takeProfit1) takeProfit2 = Number((takeProfit1 + atrValue * 0.7).toFixed(dec));
       } else if (normalizedSignal === 'SELL') {
-        if (stopLoss <= entryPrice) stopLoss = Number((entryPrice + atrValue * slMult).toFixed(2));
-        if (takeProfit1 >= entryPrice) takeProfit1 = Number((entryPrice - atrValue * tp1Mult).toFixed(2));
+        if (stopLoss <= entryPrice) stopLoss = Number((entryPrice + atrValue * slMult).toFixed(dec));
+        if (takeProfit1 >= entryPrice) takeProfit1 = Number((entryPrice - atrValue * tp1Mult).toFixed(dec));
         if (isUltraUnified && entryPrice - takeProfit1 > atrValue * 1.95) {
-          takeProfit1 = Number((entryPrice - atrValue * tp1Mult).toFixed(2));
+          takeProfit1 = Number((entryPrice - atrValue * tp1Mult).toFixed(dec));
         }
-        if (takeProfit2 >= takeProfit1) takeProfit2 = Number((takeProfit1 - atrValue * 0.7).toFixed(2));
+        if (takeProfit2 >= takeProfit1) takeProfit2 = Number((takeProfit1 - atrValue * 0.7).toFixed(dec));
       }
 
       const positionReason =
@@ -6712,14 +7077,18 @@ TUGAS KEPUTUSAN MANDIRI AI:
       const lockDir = normalizedSignal === 'SELL' ? -1 : 1;
       const tpDist = Math.abs(takeProfit1 - entryPrice);
       const lockProfitPlan = {
-        lock25Price: Number((entryPrice + lockDir * tpDist * 0.25).toFixed(2)),
-        lock50Price: Number((entryPrice + lockDir * tpDist * 0.5).toFixed(2)),
+        lock25Price: Number((entryPrice + lockDir * tpDist * 0.25).toFixed(dec)),
+        lock50Price: Number((entryPrice + lockDir * tpDist * 0.5).toFixed(dec)),
       };
 
+      const bookSourceLabel =
+        activeSymbol === 'BTC/USD'
+          ? 'Binance Order Book Depth (BTCUSDT)'
+          : `FastBull Order & Position Book (list-position ${symMeta.mt5Symbol})`;
       const dataSources = Array.from(
         new Set([
           ...globalSync.quotes.map((q) => q.source),
-          ...(fastBullPosition.available ? ['FastBull Order & Position Book (list-position XAUUSD)'] : []),
+          ...(fastBullPosition.available ? [bookSourceLabel] : []),
           ...(macroContext.dxyPrice !== null ? ['Yahoo Finance (DXY / ^TNX / ^GSPC)'] : []),
           ...macroContext.headlines.slice(0, 3).map((h) => `Berita: ${h.source}`),
         ])
@@ -6769,46 +7138,51 @@ TUGAS KEPUTUSAN MANDIRI AI:
         const nearRes = chartStructure.nearestResistance;
         const nearSup = chartStructure.nearestSupport;
 
+        const minHpFloor = Math.max(symMeta.minSlDistance * 0.5, atrValue * 0.15);
+        const minHpAnchorStep = Math.max(symMeta.minSlDistance * 0.6, atrValue * 0.25);
+        const maxHpCapStep = Math.max(symMeta.minSlDistance * 1.4, atrValue * 0.72);
+        const srWallBuffer = Math.max(symMeta.minSlDistance * 0.3, atrValue * 0.1);
+
         if (targetSideForHighTp === 'BUY') {
           const maxHighProbReach = Math.min(
-            snapshot.quote.ask + Math.max(0.75, atrValue * 0.72),
-            nearRes && nearRes.price > snapshot.quote.ask + 0.45
-              ? nearRes.price - 0.15
-              : snapshot.quote.ask + Math.max(0.75, atrValue * 0.72)
+            snapshot.quote.ask + maxHpCapStep,
+            nearRes && nearRes.price > snapshot.quote.ask + minHpAnchorStep * 1.2
+              ? nearRes.price - srWallBuffer
+              : snapshot.quote.ask + maxHpCapStep
           );
           const minProfitAnchor = Math.max(
-            snapshot.quote.ask + Math.max(0.35, atrValue * 0.25),
-            projAvgEntry + 0.35
+            snapshot.quote.ask + minHpAnchorStep,
+            projAvgEntry + minHpAnchorStep
           );
           const fallbackTp = Math.max(
             minProfitAnchor,
             Math.min(maxHighProbReach, Math.max(minProfitAnchor, snapshot.quote.ask + atrValue * 0.5))
           );
           const candidate =
-            Number.isFinite(parsedHighTp) && parsedHighTp > snapshot.quote.ask + 0.25
+            Number.isFinite(parsedHighTp) && parsedHighTp > snapshot.quote.ask + minHpFloor
               ? Math.min(parsedHighTp, Math.max(minProfitAnchor, maxHighProbReach))
               : fallbackTp;
-          highProbTp = Number(Math.max(snapshot.quote.ask + 0.35, candidate).toFixed(2));
+          highProbTp = Number(Math.max(snapshot.quote.ask + minHpAnchorStep, candidate).toFixed(dec));
         } else {
           const minHighProbReach = Math.max(
-            snapshot.quote.bid - Math.max(0.75, atrValue * 0.72),
-            nearSup && nearSup.price < snapshot.quote.bid - 0.45
-              ? nearSup.price + 0.15
-              : snapshot.quote.bid - Math.max(0.75, atrValue * 0.72)
+            snapshot.quote.bid - maxHpCapStep,
+            nearSup && nearSup.price < snapshot.quote.bid - minHpAnchorStep * 1.2
+              ? nearSup.price + srWallBuffer
+              : snapshot.quote.bid - maxHpCapStep
           );
           const maxProfitAnchor = Math.min(
-            snapshot.quote.bid - Math.max(0.35, atrValue * 0.25),
-            projAvgEntry - 0.35
+            snapshot.quote.bid - minHpAnchorStep,
+            projAvgEntry - minHpAnchorStep
           );
           const fallbackTp = Math.min(
             maxProfitAnchor,
             Math.max(minHighProbReach, Math.min(maxProfitAnchor, snapshot.quote.bid - atrValue * 0.5))
           );
           const candidate =
-            Number.isFinite(parsedHighTp) && parsedHighTp < snapshot.quote.bid - 0.25
+            Number.isFinite(parsedHighTp) && parsedHighTp < snapshot.quote.bid - minHpFloor
               ? Math.max(parsedHighTp, Math.min(maxProfitAnchor, minHighProbReach))
               : fallbackTp;
-          highProbTp = Number(Math.min(snapshot.quote.bid - 0.35, candidate).toFixed(2));
+          highProbTp = Number(Math.min(snapshot.quote.bid - minHpAnchorStep, candidate).toFixed(dec));
         }
 
         highProbTpConfidence =
@@ -6818,6 +7192,7 @@ TUGAS KEPUTUSAN MANDIRI AI:
       }
 
       const recoveryPlan = computeMathematicalRecoveryPlan({
+        symbol: activeSymbol,
         enabled: body.eaLotParams?.mathRecoveryEnabled ?? true,
         accountBalance: Number(body.accountBalance) || 10000,
         lotMode: body.eaLotParams?.lotMode ?? 'RISK_PERCENT',
@@ -6853,14 +7228,15 @@ TUGAS KEPUTUSAN MANDIRI AI:
       ) {
         finalTp1WithRecovery = recoveryPlan.recoveryTp;
         if (normalizedSignal === 'BUY' && finalTp2WithRecovery <= finalTp1WithRecovery) {
-          finalTp2WithRecovery = Number((finalTp1WithRecovery + atrValue * 0.7).toFixed(2));
+          finalTp2WithRecovery = Number((finalTp1WithRecovery + atrValue * 0.7).toFixed(dec));
         } else if (normalizedSignal === 'SELL' && finalTp2WithRecovery >= finalTp1WithRecovery) {
-          finalTp2WithRecovery = Number((finalTp1WithRecovery - atrValue * 0.7).toFixed(2));
+          finalTp2WithRecovery = Number((finalTp1WithRecovery - atrValue * 0.7).toFixed(dec));
         }
       }
 
       const analysis: EaAnalysisResult = {
         id: `ea_${Date.now()}`,
+        symbol: activeSymbol,
         timestamp: Date.now(),
         candleTime: lastCandle.time,
         priceAtAnalysis: snapshot.quote.mid,
@@ -6908,9 +7284,9 @@ TUGAS KEPUTUSAN MANDIRI AI:
         ...(normalizedLstmProbability ? { lstmProbability: normalizedLstmProbability } : {}),
         ocrExtractedPrice:
           parsed.ocrExtractedPrice ||
-          `Live Chart ${snapshot.quote.source}: Bid ${snapshot.quote.bid.toFixed(
-            2
-          )} / Ask ${snapshot.quote.ask.toFixed(2)}`,
+          `Live Chart ${snapshot.quote.source} (${activeSymbol}): Bid ${snapshot.quote.bid.toFixed(
+            dec
+          )} / Ask ${snapshot.quote.ask.toFixed(dec)}`,
         globalSyncSummary: parsed.globalSyncSummary || globalSync.summary,
         fastBullPositionSummary: fastBullPosition.summary,
         macroSummary: parsed.macroSummary || defaultMacroSummary,
@@ -6918,10 +7294,10 @@ TUGAS KEPUTUSAN MANDIRI AI:
         ...(recoveryPlan ? { recoveryPlan } : {}),
         lockProfitPlan: {
           lock25Price: Number(
-            (entryPrice + lockDir * Math.abs(finalTp1WithRecovery - entryPrice) * 0.25).toFixed(2)
+            (entryPrice + lockDir * Math.abs(finalTp1WithRecovery - entryPrice) * 0.25).toFixed(dec)
           ),
           lock50Price: Number(
-            (entryPrice + lockDir * Math.abs(finalTp1WithRecovery - entryPrice) * 0.5).toFixed(2)
+            (entryPrice + lockDir * Math.abs(finalTp1WithRecovery - entryPrice) * 0.5).toFixed(dec)
           ),
         },
         dataSources,
@@ -6931,26 +7307,27 @@ TUGAS KEPUTUSAN MANDIRI AI:
       const safeSummary = analysis.summary.replace(/\|/g, '/').replace(/[\r\n]+/g, ' ');
       const safePosReason = positionReason.replace(/\|/g, '/').replace(/[\r\n]+/g, ' ');
       const safePostTpReason = postTpReason.replace(/\|/g, '/').replace(/[\r\n]+/g, ' ');
+      const zeroPriceStr = (0).toFixed(dec);
       const mt5Line = [
         analysis.signal,
         analysis.confidence,
-        analysis.entryPrice.toFixed(2),
-        analysis.stopLoss.toFixed(2),
-        analysis.takeProfit1.toFixed(2),
-        analysis.takeProfit2.toFixed(2),
+        analysis.entryPrice.toFixed(dec),
+        analysis.stopLoss.toFixed(dec),
+        analysis.takeProfit1.toFixed(dec),
+        analysis.takeProfit2.toFixed(dec),
         safePattern,
         safeSummary,
         normalizedPosDecision,
         safePosReason,
         normalizedPostTpEval,
         safePostTpReason,
-        highProbTp !== undefined ? highProbTp.toFixed(2) : '0.00',
+        highProbTp !== undefined ? highProbTp.toFixed(dec) : zeroPriceStr,
         recoveryPlan?.isActive && recoveryPlan.mode === 'EXECUTE_NOW'
           ? recoveryPlan.recoveryLots.toFixed(2)
           : '0.00',
         recoveryPlan?.isActive && recoveryPlan.mode === 'EXECUTE_NOW'
-          ? recoveryPlan.recoveryTp.toFixed(2)
-          : '0.00',
+          ? recoveryPlan.recoveryTp.toFixed(dec)
+          : zeroPriceStr,
       ].join('|');
 
       if (useStreamKeepAlive) {
@@ -7083,7 +7460,7 @@ TUGAS KEPUTUSAN MANDIRI AI:
   }
 
   httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`AurumEA XAU/USD M5 Server listening on http://0.0.0.0:${PORT}`);
+    console.log(`AurumEA Multi-Pair Server (XAU/GBP/EUR/BTC) listening on http://0.0.0.0:${PORT}`);
   });
 }
 

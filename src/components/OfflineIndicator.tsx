@@ -15,7 +15,7 @@ export const OfflineIndicator: React.FC = () => {
     >
       <WifiOff className="w-3.5 h-3.5 shrink-0 text-[#EF4444]" />
       <span>
-        Mode Offline — Koneksi internet terputus. Feed XAU/USD real-time & AI Judge dijeda hingga jaringan kembali aktif.
+        Mode Offline — Koneksi internet terputus. Feed market real-time & AI Judge dijeda hingga jaringan kembali aktif.
       </span>
     </div>
   );

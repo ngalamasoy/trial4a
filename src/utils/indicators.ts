@@ -1,27 +1,46 @@
-import type {
-  Candle,
-  ChartStructureAnalysis,
-  HarmonicPatternSignal,
-  IndicatorSnapshot,
-  MathematicalRecoveryPlan,
-  SupportResistanceLevel,
+import {
+  getSymbolMeta,
+  type Candle,
+  type ChartStructureAnalysis,
+  type HarmonicPatternSignal,
+  type IndicatorSnapshot,
+  type MathematicalRecoveryPlan,
+  type SupportResistanceLevel,
+  type TradingSymbol,
 } from '../types/trading.ts';
 
-export function computeEmaArray(values: number[], period: number): Array<number | null> {
+export function inferPriceDecimals(price: number | undefined, symbol?: TradingSymbol): number {
+  if (symbol) return getSymbolMeta(symbol).decimals;
+  if (typeof price === 'number' && Number.isFinite(price) && price > 0 && price < 20) {
+    return 5;
+  }
+  return 2;
+}
+
+export function roundToDecimals(val: number, decimals: number): number {
+  return Number(val.toFixed(decimals));
+}
+
+export function computeEmaArray(
+  values: number[],
+  period: number,
+  decimalsOverride?: number
+): Array<number | null> {
   const result: Array<number | null> = new Array(values.length).fill(null);
   if (values.length < period) return result;
+  const decimals = decimalsOverride ?? inferPriceDecimals(values[values.length - 1]);
 
   let sum = 0;
   for (let i = 0; i < period; i++) {
     sum += values[i];
   }
   let prevEma = sum / period;
-  result[period - 1] = Number(prevEma.toFixed(2));
+  result[period - 1] = roundToDecimals(prevEma, decimals);
 
   const k = 2 / (period + 1);
   for (let i = period; i < values.length; i++) {
     prevEma = values[i] * k + prevEma * (1 - k);
-    result[i] = Number(prevEma.toFixed(2));
+    result[i] = roundToDecimals(prevEma, decimals);
   }
   return result;
 }
@@ -53,7 +72,10 @@ export function computeRsi14(closes: number[], period = 14): number | null {
   return Number((100 - 100 / (1 + rs)).toFixed(2));
 }
 
-export function computeMacd(closes: number[]): {
+export function computeMacd(
+  closes: number[],
+  symbol?: TradingSymbol
+): {
   line: number | null;
   signal: number | null;
   histogram: number | null;
@@ -62,8 +84,12 @@ export function computeMacd(closes: number[]): {
     return { line: null, signal: null, histogram: null };
   }
 
-  const ema12 = computeEmaArray(closes, 12);
-  const ema26 = computeEmaArray(closes, 26);
+  const priceDecimals = inferPriceDecimals(closes[closes.length - 1], symbol);
+  const emaPrecision = Math.max(4, priceDecimals + 2);
+  const outPrecision = priceDecimals >= 5 ? 5 : 3;
+
+  const ema12 = computeEmaArray(closes, 12, emaPrecision);
+  const ema26 = computeEmaArray(closes, 26, emaPrecision);
 
   const macdValues: number[] = [];
   for (let i = 0; i < closes.length; i++) {
@@ -78,23 +104,28 @@ export function computeMacd(closes: number[]): {
     return { line: null, signal: null, histogram: null };
   }
 
-  const signalArr = computeEmaArray(macdValues, 9);
+  const signalArr = computeEmaArray(macdValues, 9, emaPrecision);
   const lastMacd = macdValues[macdValues.length - 1];
   const lastSignal = signalArr[signalArr.length - 1];
 
   if (lastSignal === null) {
-    return { line: Number(lastMacd.toFixed(3)), signal: null, histogram: null };
+    return { line: Number(lastMacd.toFixed(outPrecision)), signal: null, histogram: null };
   }
 
   return {
-    line: Number(lastMacd.toFixed(3)),
-    signal: Number(lastSignal.toFixed(3)),
-    histogram: Number((lastMacd - lastSignal).toFixed(3)),
+    line: Number(lastMacd.toFixed(outPrecision)),
+    signal: Number(lastSignal.toFixed(outPrecision)),
+    histogram: Number((lastMacd - lastSignal).toFixed(outPrecision)),
   };
 }
 
-export function computeAtr14(candles: Candle[], period = 14): number | null {
+export function computeAtr14(
+  candles: Candle[],
+  period = 14,
+  symbol?: TradingSymbol
+): number | null {
   if (candles.length <= period) return null;
+  const decimals = inferPriceDecimals(candles[candles.length - 1]?.close, symbol);
 
   const trs: number[] = [];
   for (let i = 1; i < candles.length; i++) {
@@ -118,13 +149,14 @@ export function computeAtr14(candles: Candle[], period = 14): number | null {
     atr = (atr * (period - 1) + trs[i]) / period;
   }
 
-  return Number(atr.toFixed(2));
+  return roundToDecimals(atr, decimals);
 }
 
 export function computeBollingerSeries(
   candles: Candle[],
   period = 20,
-  mult = 2
+  mult = 2,
+  symbol?: TradingSymbol
 ): {
   upperSeries: Array<{ time: number; value: number }>;
   lowerSeries: Array<{ time: number; value: number }>;
@@ -141,6 +173,7 @@ export function computeBollingerSeries(
   if (candles.length < period) {
     return { upperSeries, lowerSeries, latest };
   }
+  const decimals = inferPriceDecimals(candles[candles.length - 1]?.close, symbol);
 
   for (let i = period - 1; i < candles.length; i++) {
     let sum = 0;
@@ -156,9 +189,9 @@ export function computeBollingerSeries(
     }
     const stdDev = Math.sqrt(sqDiffSum / period);
 
-    const upper = Number((mean + mult * stdDev).toFixed(2));
-    const lower = Number((mean - mult * stdDev).toFixed(2));
-    const middle = Number(mean.toFixed(2));
+    const upper = roundToDecimals(mean + mult * stdDev, decimals);
+    const lower = roundToDecimals(mean - mult * stdDev, decimals);
+    const middle = roundToDecimals(mean, decimals);
 
     upperSeries.push({ time: candles[i].time, value: upper });
     lowerSeries.push({ time: candles[i].time, value: lower });
@@ -172,8 +205,11 @@ export function computeBollingerSeries(
 
 export function analyzeChartStructure(
   candles: Candle[],
-  atr: number | null
+  atr: number | null,
+  symbol?: TradingSymbol
 ): ChartStructureAnalysis {
+  const refClose = candles[candles.length - 1]?.close;
+  const decimals = inferPriceDecimals(refClose, symbol);
   if (candles.length < 10) {
     const last = candles[candles.length - 1];
     const high = last?.high ?? 0;
@@ -185,9 +221,9 @@ export function analyzeChartStructure(
       nearestSupport: null,
       resistances: [],
       supports: [],
-      pivotPoint: last ? Number(((high + low + last.close) / 3).toFixed(2)) : null,
-      sessionHigh: Number(high.toFixed(2)),
-      sessionLow: Number(low.toFixed(2)),
+      pivotPoint: last ? roundToDecimals((high + low + last.close) / 3, decimals) : null,
+      sessionHigh: roundToDecimals(high, decimals),
+      sessionLow: roundToDecimals(low, decimals),
       roundLevels: [],
       candlestickPatterns: [],
       chartPatterns: [],
@@ -199,8 +235,21 @@ export function analyzeChartStructure(
 
   const n = candles.length;
   const currentPrice = candles[n - 1].close;
-  const safeAtr = Math.max(0.5, atr ?? 2.5);
-  const clusterTol = Math.max(0.65, safeAtr * 0.45);
+  const isForex5 = decimals >= 5;
+  const isCrypto = currentPrice > 10000;
+  const defaultAtr = symbol
+    ? getSymbolMeta(symbol).defaultAtr
+    : isForex5
+    ? 0.001
+    : isCrypto
+    ? 180
+    : 2.5;
+  const minSafeAtr = isForex5 ? 0.00015 : isCrypto ? 15 : 0.5;
+  const safeAtr = Math.max(minSafeAtr, atr ?? defaultAtr);
+  const clusterTol = Math.max(
+    isForex5 ? 0.0002 : isCrypto ? 25 : 0.65,
+    safeAtr * 0.45
+  );
 
   interface RawPivot {
     idx: number;
@@ -244,9 +293,9 @@ export function analyzeChartStructure(
   }
 
   const sessionSlice = candles.slice(-96);
-  const sessionHigh = Number(Math.max(...sessionSlice.map((c) => c.high)).toFixed(2));
-  const sessionLow = Number(Math.min(...sessionSlice.map((c) => c.low)).toFixed(2));
-  const pivotPoint = Number(((sessionHigh + sessionLow + currentPrice) / 3).toFixed(2));
+  const sessionHigh = roundToDecimals(Math.max(...sessionSlice.map((c) => c.high)), decimals);
+  const sessionLow = roundToDecimals(Math.min(...sessionSlice.map((c) => c.low)), decimals);
+  const pivotPoint = roundToDecimals((sessionHigh + sessionLow + currentPrice) / 3, decimals);
 
   // Add session extreme & prior major swings as anchor pivots
   const allPivots: RawPivot[] = [
@@ -291,9 +340,9 @@ export function analyzeChartStructure(
   }
 
   // Count additional historical wick/close rejections near each cluster center
-  const wickTol = Math.max(0.35, safeAtr * 0.22);
+  const wickTol = Math.max(isForex5 ? 0.0001 : isCrypto ? 12 : 0.35, safeAtr * 0.22);
   const scoredLevels = clusters.map((cl) => {
-    const price = Number((cl.weightedSum / cl.weightTotal).toFixed(2));
+    const price = roundToDecimals(cl.weightedSum / cl.weightTotal, decimals);
     let reactionTouches = 0;
     for (let i = Math.max(0, n - 140); i < n - 1; i++) {
       const c = candles[i];
@@ -311,7 +360,10 @@ export function analyzeChartStructure(
     return { price, touches, strength };
   });
 
-  const minGapFromPrice = Math.max(0.15, safeAtr * 0.08);
+  const minGapFromPrice = Math.max(
+    isForex5 ? 0.00004 : isCrypto ? 4 : 0.15,
+    safeAtr * 0.08
+  );
   const rawResistances = scoredLevels
     .filter((l) => l.price > currentPrice + minGapFromPrice)
     .sort((a, b) => a.price - b.price);
@@ -330,9 +382,12 @@ export function analyzeChartStructure(
     return out;
   };
 
-  const minSpacing = Math.max(0.8, safeAtr * 0.55);
+  const minSpacing = Math.max(
+    isForex5 ? 0.00025 : isCrypto ? 30 : 0.8,
+    safeAtr * 0.55
+  );
   const resistances: SupportResistanceLevel[] = dedupLevels(rawResistances, minSpacing).map((l, idx) => {
-    const dist = Number((l.price - currentPrice).toFixed(2));
+    const dist = roundToDecimals(l.price - currentPrice, decimals);
     const distAtr = Number((dist / safeAtr).toFixed(2));
     return {
       price: l.price,
@@ -346,7 +401,7 @@ export function analyzeChartStructure(
   });
 
   const supports: SupportResistanceLevel[] = dedupLevels(rawSupports, minSpacing).map((l, idx) => {
-    const dist = Number((currentPrice - l.price).toFixed(2));
+    const dist = roundToDecimals(currentPrice - l.price, decimals);
     const distAtr = Number((dist / safeAtr).toFixed(2));
     return {
       price: l.price,
@@ -372,36 +427,38 @@ export function analyzeChartStructure(
     const slPrev = swingLows[swingLows.length - 2];
     const slLast = swingLows[swingLows.length - 1];
 
-    const hh = shLast.price > shPrev.price + 0.2;
-    const lh = shLast.price < shPrev.price - 0.2;
-    const hl = slLast.price > slPrev.price + 0.2;
-    const ll = slLast.price < slPrev.price - 0.2;
+    const structMoveTol = Math.max(isForex5 ? 0.00005 : isCrypto ? 8 : 0.2, safeAtr * 0.08);
+    const bosTol = Math.max(isForex5 ? 0.00006 : isCrypto ? 10 : 0.25, safeAtr * 0.1);
+    const hh = shLast.price > shPrev.price + structMoveTol;
+    const lh = shLast.price < shPrev.price - structMoveTol;
+    const hl = slLast.price > slPrev.price + structMoveTol;
+    const ll = slLast.price < slPrev.price - structMoveTol;
 
     if (hh && hl) {
       if (currentPrice < slLast.price) {
         marketStructure = 'TRANSITION_BOS';
-        structureSummary = `Transisi Bearish CHoCH: sempat HH (${shLast.price.toFixed(2)}) & HL (${slLast.price.toFixed(2)}), namun harga menembus ke bawah HL terakhir.`;
+        structureSummary = `Transisi Bearish CHoCH: sempat HH (${shLast.price.toFixed(decimals)}) & HL (${slLast.price.toFixed(decimals)}), namun harga menembus ke bawah HL terakhir.`;
       } else {
         marketStructure = 'UPTREND_HH_HL';
-        structureSummary = `Uptrend Struktur Sehat (HH ${shPrev.price.toFixed(2)}→${shLast.price.toFixed(2)} & HL ${slPrev.price.toFixed(2)}→${slLast.price.toFixed(2)}).`;
+        structureSummary = `Uptrend Struktur Sehat (HH ${shPrev.price.toFixed(decimals)}→${shLast.price.toFixed(decimals)} & HL ${slPrev.price.toFixed(decimals)}→${slLast.price.toFixed(decimals)}).`;
       }
     } else if (lh && ll) {
       if (currentPrice > shLast.price) {
         marketStructure = 'TRANSITION_BOS';
-        structureSummary = `Transisi Bullish CHoCH: sempat LH (${shLast.price.toFixed(2)}) & LL (${slLast.price.toFixed(2)}), namun harga break di atas LH terakhir.`;
+        structureSummary = `Transisi Bullish CHoCH: sempat LH (${shLast.price.toFixed(decimals)}) & LL (${slLast.price.toFixed(decimals)}), namun harga break di atas LH terakhir.`;
       } else {
         marketStructure = 'DOWNTREND_LH_LL';
-        structureSummary = `Downtrend Struktur Sehat (LH ${shPrev.price.toFixed(2)}→${shLast.price.toFixed(2)} & LL ${slPrev.price.toFixed(2)}→${slLast.price.toFixed(2)}).`;
+        structureSummary = `Downtrend Struktur Sehat (LH ${shPrev.price.toFixed(decimals)}→${shLast.price.toFixed(decimals)} & LL ${slPrev.price.toFixed(decimals)}→${slLast.price.toFixed(decimals)}).`;
       }
-    } else if (currentPrice > shLast.price + 0.25) {
+    } else if (currentPrice > shLast.price + bosTol) {
       marketStructure = 'TRANSITION_BOS';
-      structureSummary = `Bullish Breakout / BOS ke atas Swing High ${shLast.price.toFixed(2)}.`;
-    } else if (currentPrice < slLast.price - 0.25) {
+      structureSummary = `Bullish Breakout / BOS ke atas Swing High ${shLast.price.toFixed(decimals)}.`;
+    } else if (currentPrice < slLast.price - bosTol) {
       marketStructure = 'TRANSITION_BOS';
-      structureSummary = `Bearish Breakdown / BOS ke bawah Swing Low ${slLast.price.toFixed(2)}.`;
+      structureSummary = `Bearish Breakdown / BOS ke bawah Swing Low ${slLast.price.toFixed(decimals)}.`;
     } else {
       marketStructure = 'CONSOLIDATION';
-      structureSummary = `Konsolidasi Range antara Swing Low ${slLast.price.toFixed(2)} dan Swing High ${shLast.price.toFixed(2)}.`;
+      structureSummary = `Konsolidasi Range antara Swing Low ${slLast.price.toFixed(decimals)} dan Swing High ${shLast.price.toFixed(decimals)}.`;
     }
   }
 
@@ -410,9 +467,10 @@ export function analyzeChartStructure(
   const barCur = candles[n - 1];
   const barPrev = candles[n - 2];
   const barPrev2 = candles[n - 3];
+  const minRangeFloor = isForex5 ? 0.00002 : isCrypto ? 5 : 0.05;
 
   const inspectCandle = (c: Candle, tag: string) => {
-    const range = Math.max(0.05, c.high - c.low);
+    const range = Math.max(minRangeFloor, c.high - c.low);
     const body = Math.abs(c.close - c.open);
     const upWick = c.high - Math.max(c.open, c.close);
     const dnWick = Math.min(c.open, c.close) - c.low;
@@ -430,7 +488,7 @@ export function analyzeChartStructure(
       );
     } else if (body / range >= 0.72 && range >= safeAtr * 0.85) {
       candlestickPatterns.push(
-        `${isBull ? 'Bullish' : 'Bearish'} Momentum Marubozu (${tag}, body ${body.toFixed(2)} USD)`
+        `${isBull ? 'Bullish' : 'Bearish'} Momentum Marubozu (${tag}, body ${body.toFixed(decimals)})`
       );
     } else if (body / range <= 0.16 && range >= safeAtr * 0.45) {
       candlestickPatterns.push(`Doji / Keraguan Pasar (${tag})`);
@@ -465,7 +523,7 @@ export function analyzeChartStructure(
     const h2 = swingHighs[swingHighs.length - 1];
     if (h2.idx - h1.idx >= 5 && Math.abs(h1.price - h2.price) <= safeAtr * 0.45) {
       chartPatterns.push(
-        `Double Top / Equal Highs Liquidity Pool sekitar ${((h1.price + h2.price) / 2).toFixed(2)}`
+        `Double Top / Equal Highs Liquidity Pool sekitar ${((h1.price + h2.price) / 2).toFixed(decimals)}`
       );
     }
   }
@@ -474,7 +532,7 @@ export function analyzeChartStructure(
     const l2 = swingLows[swingLows.length - 1];
     if (l2.idx - l1.idx >= 5 && Math.abs(l1.price - l2.price) <= safeAtr * 0.45) {
       chartPatterns.push(
-        `Double Bottom / Equal Lows Liquidity Pool sekitar ${((l1.price + l2.price) / 2).toFixed(2)}`
+        `Double Bottom / Equal Lows Liquidity Pool sekitar ${((l1.price + l2.price) / 2).toFixed(decimals)}`
       );
     }
   }
@@ -492,9 +550,9 @@ export function analyzeChartStructure(
     const flatTol = safeAtr * 0.35;
 
     if (Math.abs(highDelta) <= flatTol && lowDelta > flatTol * 1.2) {
-      chartPatterns.push(`Ascending Triangle (Resistance datar ~${max2.toFixed(2)}, Low meninggi)`);
+      chartPatterns.push(`Ascending Triangle (Resistance datar ~${max2.toFixed(decimals)}, Low meninggi)`);
     } else if (Math.abs(lowDelta) <= flatTol && highDelta < -flatTol * 1.2) {
-      chartPatterns.push(`Descending Triangle (Support datar ~${min2.toFixed(2)}, High menurun)`);
+      chartPatterns.push(`Descending Triangle (Support datar ~${min2.toFixed(decimals)}, High menurun)`);
     } else if (highDelta < -flatTol && lowDelta > flatTol) {
       chartPatterns.push('Symmetrical Triangle (Kompresi harga mengerucut siap breakout)');
     } else if (highDelta > flatTol && lowDelta > highDelta * 1.25) {
@@ -508,53 +566,66 @@ export function analyzeChartStructure(
   if (swingHighs.length >= 1) {
     const refHigh = swingHighs[swingHighs.length - 1];
     if (n - 1 - refHigh.idx >= 3 && (barPrev.high > refHigh.price || barCur.high > refHigh.price) && currentPrice < refHigh.price) {
-      chartPatterns.push(`Bearish Liquidity Sweep di atas ${refHigh.price.toFixed(2)} (Fake Breakout)`);
+      chartPatterns.push(`Bearish Liquidity Sweep di atas ${refHigh.price.toFixed(decimals)} (Fake Breakout)`);
     } else if (n - 1 - refHigh.idx >= 3 && barPrev.close > refHigh.price && currentPrice > refHigh.price) {
-      chartPatterns.push(`Bullish Breakout terkonfirmasi di atas ${refHigh.price.toFixed(2)}`);
+      chartPatterns.push(`Bullish Breakout terkonfirmasi di atas ${refHigh.price.toFixed(decimals)}`);
     }
   }
   if (swingLows.length >= 1) {
     const refLow = swingLows[swingLows.length - 1];
     if (n - 1 - refLow.idx >= 3 && (barPrev.low < refLow.price || barCur.low < refLow.price) && currentPrice > refLow.price) {
-      chartPatterns.push(`Bullish Liquidity Sweep di bawah ${refLow.price.toFixed(2)} (Stop Hunt Rejection)`);
+      chartPatterns.push(`Bullish Liquidity Sweep di bawah ${refLow.price.toFixed(decimals)} (Stop Hunt Rejection)`);
     } else if (n - 1 - refLow.idx >= 3 && barPrev.close < refLow.price && currentPrice < refLow.price) {
-      chartPatterns.push(`Bearish Breakdown terkonfirmasi di bawah ${refLow.price.toFixed(2)}`);
+      chartPatterns.push(`Bearish Breakdown terkonfirmasi di bawah ${refLow.price.toFixed(decimals)}`);
     }
   }
 
   // Fair Value Gaps (FVG / Imbalance) in last 25 candles
   const fvgZones: ChartStructureAnalysis['fvgZones'] = [];
+  const fvgMinGap = Math.max(isForex5 ? 0.00004 : isCrypto ? 5 : 0.15, safeAtr * 0.06);
   const startFvg = Math.max(2, n - 25);
   for (let i = startFvg; i < n; i++) {
     const c0 = candles[i - 2];
     const c2 = candles[i];
-    if (c0.high < c2.low - 0.15 && currentPrice >= c0.high) {
+    if (c0.high < c2.low - fvgMinGap && currentPrice >= c0.high) {
       fvgZones.push({
         type: 'BULLISH_FVG',
-        low: Number(c0.high.toFixed(2)),
-        high: Number(c2.low.toFixed(2)),
+        low: roundToDecimals(c0.high, decimals),
+        high: roundToDecimals(c2.low, decimals),
       });
-    } else if (c0.low > c2.high + 0.15 && currentPrice <= c0.low) {
+    } else if (c0.low > c2.high + fvgMinGap && currentPrice <= c0.low) {
       fvgZones.push({
         type: 'BEARISH_FVG',
-        low: Number(c2.high.toFixed(2)),
-        high: Number(c0.low.toFixed(2)),
+        low: roundToDecimals(c2.high, decimals),
+        high: roundToDecimals(c0.low, decimals),
       });
     }
   }
 
-  // Nearest Psychological Round Levels ($10 increments on XAU/USD)
-  const baseTen = Math.floor(currentPrice / 10) * 10;
-  const roundLevels = [baseTen - 10, baseTen, baseTen + 10, baseTen + 20]
+  // Nearest Psychological Round Levels scaled to asset class
+  const roundStep = symbol
+    ? getSymbolMeta(symbol).roundIncrement
+    : isForex5
+    ? 0.005
+    : isCrypto
+    ? 500
+    : 10;
+  const baseRound = Math.floor(currentPrice / roundStep) * roundStep;
+  const roundLevels = [
+    roundToDecimals(baseRound - roundStep, decimals),
+    roundToDecimals(baseRound, decimals),
+    roundToDecimals(baseRound + roundStep, decimals),
+    roundToDecimals(baseRound + roundStep * 2, decimals),
+  ]
     .filter((lvl) => lvl > 0)
     .sort((a, b) => Math.abs(a - currentPrice) - Math.abs(b - currentPrice))
     .slice(0, 3);
 
   const resNote = nearestResistance
-    ? `R1=${nearestResistance.price.toFixed(2)} (+${nearestResistance.distanceUsd.toFixed(2)} USD / ${nearestResistance.distanceAtr} ATR${nearestResistance.distanceAtr <= 0.35 ? ' · SANGAT DEKAT ATAP' : ''})`
+    ? `R1=${nearestResistance.price.toFixed(decimals)} (+${nearestResistance.distanceUsd.toFixed(decimals)} / ${nearestResistance.distanceAtr} ATR${nearestResistance.distanceAtr <= 0.35 ? ' · SANGAT DEKAT ATAP' : ''})`
     : 'Tidak ada R terdekat';
   const supNote = nearestSupport
-    ? `S1=${nearestSupport.price.toFixed(2)} (-${nearestSupport.distanceUsd.toFixed(2)} USD / ${nearestSupport.distanceAtr} ATR${nearestSupport.distanceAtr <= 0.35 ? ' · SANGAT DEKAT LANTAI' : ''})`
+    ? `S1=${nearestSupport.price.toFixed(decimals)} (-${nearestSupport.distanceUsd.toFixed(decimals)} / ${nearestSupport.distanceAtr} ATR${nearestSupport.distanceAtr <= 0.35 ? ' · SANGAT DEKAT LANTAI' : ''})`
     : 'Tidak ada S terdekat';
   const pricePositionNote = `${resNote} | ${supNote}`;
 
@@ -648,7 +719,7 @@ export function analyzeChartStructure(
       const cdBc = cd / bc;
       const cdAb = cd / ab;
       const bcXa = bc / xa;
-      const cdXc = xc > 0.05 ? cd / xc : 0;
+      const cdXc = xc > minRangeFloor ? cd / xc : 0;
 
       type PatDef = {
         name: HarmonicPatternSignal['name'];
@@ -740,9 +811,9 @@ export function analyzeChartStructure(
         idealD = isBullish ? s.a - xa * matched.idealAdXa : s.a + xa * matched.idealAdXa;
       }
 
-      const przPad = Math.max(0.45, safeAtr * 0.38);
-      const przLow = Number((Math.min(idealD, s.d) - przPad * 0.5).toFixed(2));
-      const przHigh = Number((Math.max(idealD, s.d) + przPad * 0.5).toFixed(2));
+      const przPad = Math.max(isForex5 ? 0.00015 : isCrypto ? 15 : 0.45, safeAtr * 0.38);
+      const przLow = roundToDecimals(Math.min(idealD, s.d) - przPad * 0.5, decimals);
+      const przHigh = roundToDecimals(Math.max(idealD, s.d) + przPad * 0.5, decimals);
       const distToPrz =
         currentPrice < przLow
           ? przLow - currentPrice
@@ -759,18 +830,19 @@ export function analyzeChartStructure(
         continue;
       }
 
-      const target1 = Number(
-        (isBullish ? s.d + ad * 0.382 : s.d - ad * 0.382).toFixed(2)
+      const target1 = roundToDecimals(
+        isBullish ? s.d + ad * 0.382 : s.d - ad * 0.382,
+        decimals
       );
-      const target2 = Number(
-        (isBullish ? s.d + ad * 0.618 : s.d - ad * 0.618).toFixed(2)
+      const target2 = roundToDecimals(
+        isBullish ? s.d + ad * 0.618 : s.d - ad * 0.618,
+        decimals
       );
-      const invalidation = Number(
-        (
-          isBullish
-            ? Math.min(s.x, s.d) - safeAtr * 0.45
-            : Math.max(s.x, s.d) + safeAtr * 0.45
-        ).toFixed(2)
+      const invalidation = roundToDecimals(
+        isBullish
+          ? Math.min(s.x, s.d) - safeAtr * 0.45
+          : Math.max(s.x, s.d) + safeAtr * 0.45,
+        decimals
       );
 
       const score = (status === 'AT_PRZ' ? 2 : status === 'APPROACHING_PRZ' ? 1 : 0.5) - matched.err;
@@ -781,11 +853,11 @@ export function analyzeChartStructure(
             name: matched.name,
             direction,
             status,
-            xPrice: Number(s.x.toFixed(2)),
-            aPrice: Number(s.a.toFixed(2)),
-            bPrice: Number(s.b.toFixed(2)),
-            cPrice: Number(s.c.toFixed(2)),
-            dPrice: Number(s.d.toFixed(2)),
+            xPrice: roundToDecimals(s.x, decimals),
+            aPrice: roundToDecimals(s.a, decimals),
+            bPrice: roundToDecimals(s.b, decimals),
+            cPrice: roundToDecimals(s.c, decimals),
+            dPrice: roundToDecimals(s.d, decimals),
             przLow,
             przHigh,
             ratiosSummary: `AB/XA=${abXa.toFixed(3)}, BC/AB=${bcAb.toFixed(3)}, AD/XA=${adXa.toFixed(3)}`,
@@ -803,7 +875,7 @@ export function analyzeChartStructure(
   const harmonicPattern = detectHarmonicPattern();
   if (harmonicPattern && (harmonicPattern.status === 'AT_PRZ' || harmonicPattern.status === 'APPROACHING_PRZ')) {
     chartPatterns.unshift(
-      `${harmonicPattern.direction} Harmonic ${harmonicPattern.name} (${harmonicPattern.status} PRZ ${harmonicPattern.przLow.toFixed(2)}-${harmonicPattern.przHigh.toFixed(2)})`
+      `${harmonicPattern.direction} Harmonic ${harmonicPattern.name} (${harmonicPattern.status} PRZ ${harmonicPattern.przLow.toFixed(decimals)}-${harmonicPattern.przHigh.toFixed(decimals)})`
     );
   }
 
@@ -934,18 +1006,23 @@ export function computeObvTrend(
   return 'NEUTRAL';
 }
 
-export function computeFibonacciLevels(candles: Candle[]): IndicatorSnapshot['fibonacci'] {
+export function computeFibonacciLevels(
+  candles: Candle[],
+  symbol?: TradingSymbol
+): IndicatorSnapshot['fibonacci'] {
   const slice = candles.slice(-60);
   if (slice.length < 10) return undefined;
+  const decimals = inferPriceDecimals(slice[slice.length - 1]?.close, symbol);
   let highIdx = 0;
   let lowIdx = 0;
   for (let i = 1; i < slice.length; i++) {
     if (slice[i].high > slice[highIdx].high) highIdx = i;
     if (slice[i].low < slice[lowIdx].low) lowIdx = i;
   }
-  const swingHigh = Number(slice[highIdx].high.toFixed(2));
-  const swingLow = Number(slice[lowIdx].low.toFixed(2));
-  const range = Math.max(0.5, swingHigh - swingLow);
+  const swingHigh = roundToDecimals(slice[highIdx].high, decimals);
+  const swingLow = roundToDecimals(slice[lowIdx].low, decimals);
+  const minRange = decimals >= 5 ? 0.0002 : swingHigh > 10000 ? 15 : 0.5;
+  const range = Math.max(minRange, swingHigh - swingLow);
   const trend: 'UP' | 'DOWN' = highIdx > lowIdx ? 'UP' : 'DOWN';
 
   if (trend === 'UP') {
@@ -953,28 +1030,31 @@ export function computeFibonacciLevels(candles: Candle[]): IndicatorSnapshot['fi
       swingHigh,
       swingLow,
       trend,
-      r382: Number((swingHigh - range * 0.382).toFixed(2)),
-      r500: Number((swingHigh - range * 0.5).toFixed(2)),
-      r618: Number((swingHigh - range * 0.618).toFixed(2)),
-      r786: Number((swingHigh - range * 0.786).toFixed(2)),
-      ext1272: Number((swingLow + range * 1.272).toFixed(2)),
-      ext1618: Number((swingLow + range * 1.618).toFixed(2)),
+      r382: roundToDecimals(swingHigh - range * 0.382, decimals),
+      r500: roundToDecimals(swingHigh - range * 0.5, decimals),
+      r618: roundToDecimals(swingHigh - range * 0.618, decimals),
+      r786: roundToDecimals(swingHigh - range * 0.786, decimals),
+      ext1272: roundToDecimals(swingLow + range * 1.272, decimals),
+      ext1618: roundToDecimals(swingLow + range * 1.618, decimals),
     };
   }
   return {
     swingHigh,
     swingLow,
     trend,
-    r382: Number((swingLow + range * 0.382).toFixed(2)),
-    r500: Number((swingLow + range * 0.5).toFixed(2)),
-    r618: Number((swingLow + range * 0.618).toFixed(2)),
-    r786: Number((swingLow + range * 0.786).toFixed(2)),
-    ext1272: Number((swingHigh - range * 1.272).toFixed(2)),
-    ext1618: Number((swingHigh - range * 1.618).toFixed(2)),
+    r382: roundToDecimals(swingLow + range * 0.382, decimals),
+    r500: roundToDecimals(swingLow + range * 0.5, decimals),
+    r618: roundToDecimals(swingLow + range * 0.618, decimals),
+    r786: roundToDecimals(swingLow + range * 0.786, decimals),
+    ext1272: roundToDecimals(swingHigh - range * 1.272, decimals),
+    ext1618: roundToDecimals(swingHigh - range * 1.618, decimals),
   };
 }
 
-export function buildIndicatorPack(candles: Candle[]): {
+export function buildIndicatorPack(
+  candles: Candle[],
+  symbol?: TradingSymbol
+): {
   snapshot: IndicatorSnapshot;
   ema9Series: Array<{ time: number; value: number }>;
   ema21Series: Array<{ time: number; value: number }>;
@@ -983,10 +1063,11 @@ export function buildIndicatorPack(candles: Candle[]): {
   bbLowerSeries: Array<{ time: number; value: number }>;
 } {
   const closes = candles.map((c) => c.close);
-  const ema9Arr = computeEmaArray(closes, 9);
-  const ema21Arr = computeEmaArray(closes, 21);
-  const ema50Arr = computeEmaArray(closes, 50);
-  const ema200Arr = computeEmaArray(closes, 200);
+  const decimals = inferPriceDecimals(closes[closes.length - 1], symbol);
+  const ema9Arr = computeEmaArray(closes, 9, decimals);
+  const ema21Arr = computeEmaArray(closes, 21, decimals);
+  const ema50Arr = computeEmaArray(closes, 50, decimals);
+  const ema200Arr = computeEmaArray(closes, 200, decimals);
 
   const ema9Series: Array<{ time: number; value: number }> = [];
   const ema21Series: Array<{ time: number; value: number }> = [];
@@ -999,12 +1080,12 @@ export function buildIndicatorPack(candles: Candle[]): {
     if (ema50Arr[i] !== null) ema50Series.push({ time: t, value: ema50Arr[i]! });
   }
 
-  const bb = computeBollingerSeries(candles, 20, 2);
+  const bb = computeBollingerSeries(candles, 20, 2, symbol);
   const lookback = candles.slice(-30);
   const swingHigh = lookback.length > 0 ? Math.max(...lookback.map((c) => c.high)) : 0;
   const swingLow = lookback.length > 0 ? Math.min(...lookback.map((c) => c.low)) : 0;
-  const atr14 = computeAtr14(candles, 14);
-  const structure = analyzeChartStructure(candles, atr14);
+  const atr14 = computeAtr14(candles, 14, symbol);
+  const structure = analyzeChartStructure(candles, atr14, symbol);
 
   const lastIdx = candles.length - 1;
   const snapshot: IndicatorSnapshot = {
@@ -1016,12 +1097,12 @@ export function buildIndicatorPack(candles: Candle[]): {
     stochastic: computeStochastic(candles, 14, 3),
     adx14: computeAdx14(candles, 14),
     obvTrend: computeObvTrend(candles, 20),
-    fibonacci: computeFibonacciLevels(candles),
-    macd: computeMacd(closes),
+    fibonacci: computeFibonacciLevels(candles, symbol),
+    macd: computeMacd(closes, symbol),
     atr14,
     bollinger: bb.latest,
-    swingHigh: Number(swingHigh.toFixed(2)),
-    swingLow: Number(swingLow.toFixed(2)),
+    swingHigh: roundToDecimals(swingHigh, decimals),
+    swingLow: roundToDecimals(swingLow, decimals),
     structure,
   };
 
@@ -1035,33 +1116,57 @@ export function buildIndicatorPack(candles: Candle[]): {
   };
 }
 
+export function calculatePairLotSize(
+  balance: number,
+  riskPercent: number,
+  entryPrice: number,
+  stopLoss: number,
+  symbol?: TradingSymbol
+): number {
+  const meta = getSymbolMeta(symbol);
+  const slDistance = Math.abs(entryPrice - stopLoss);
+  if (slDistance < meta.minSlDistance) return 0.01;
+  const riskUsd = (balance * riskPercent) / 100;
+  const rawLots = riskUsd / (slDistance * meta.contractSize);
+  const clamped = Math.max(0.01, Math.min(10.0, rawLots));
+  return Number(clamped.toFixed(2));
+}
+
+export function calculatePairPnl(
+  side: 'BUY' | 'SELL',
+  lots: number,
+  entryPrice: number,
+  currentPrice: number,
+  symbol?: TradingSymbol
+): number {
+  const meta = getSymbolMeta(symbol);
+  const diff = side === 'BUY' ? currentPrice - entryPrice : entryPrice - currentPrice;
+  return Number((diff * lots * meta.contractSize).toFixed(2));
+}
+
 export function calculateXauLotSize(
   balance: number,
   riskPercent: number,
   entryPrice: number,
-  stopLoss: number
+  stopLoss: number,
+  symbol: TradingSymbol = 'XAU/USD'
 ): number {
-  const slDistance = Math.abs(entryPrice - stopLoss);
-  if (slDistance < 0.25) return 0.01;
-  const riskUsd = (balance * riskPercent) / 100;
-  // Standard XAUUSD: 1.00 lot = 100 oz => $100 per $1.00 price move
-  const rawLots = riskUsd / (slDistance * 100);
-  const clamped = Math.max(0.01, Math.min(10.0, rawLots));
-  return Number(clamped.toFixed(2));
+  return calculatePairLotSize(balance, riskPercent, entryPrice, stopLoss, symbol);
 }
 
 export function calculateXauPnl(
   side: 'BUY' | 'SELL',
   lots: number,
   entryPrice: number,
-  currentPrice: number
+  currentPrice: number,
+  symbol: TradingSymbol = 'XAU/USD'
 ): number {
-  const diff = side === 'BUY' ? currentPrice - entryPrice : entryPrice - currentPrice;
-  return Number((diff * lots * 100).toFixed(2));
+  return calculatePairPnl(side, lots, entryPrice, currentPrice, symbol);
 }
 
 export interface ComputeRecoveryInput {
   enabled?: boolean;
+  symbol?: TradingSymbol;
   accountBalance: number;
   lotMode?: 'RISK_PERCENT' | 'FIXED_LOT';
   fixedLot?: number;
@@ -1144,7 +1249,17 @@ export function computeMathematicalRecoveryPlan(
     return undefined;
   }
 
-  const safeAtr = Math.max(0.5, Number(input.atr) || 2.5);
+  const inferredSymbol: TradingSymbol =
+    input.symbol ??
+    (input.bid > 0 && input.bid < 20
+      ? 'EUR/USD'
+      : input.bid > 15000
+      ? 'BTC/USD'
+      : 'XAU/USD');
+  const meta = getSymbolMeta(inferredSymbol);
+  const decimals = meta.decimals;
+  const contractSize = meta.contractSize;
+  const safeAtr = Math.max(meta.minSlDistance * 2, Number(input.atr) || meta.defaultAtr);
   const lotMode = input.lotMode ?? 'RISK_PERCENT';
   const configuredFixed = Math.max(0.01, Math.min(20, Number(input.fixedLot) || 0.05));
   const configuredRiskPct = Math.max(0.1, Math.min(10, Number(input.riskPercent) || 1.0));
@@ -1166,13 +1281,19 @@ export function computeMathematicalRecoveryPlan(
     direction = input.recentClosedTrades[0].side === 'BUY' ? 'SELL' : 'BUY';
   }
 
-  const entryPrice = Number((direction === 'BUY' ? input.ask : input.bid).toFixed(2));
+  const entryPrice = roundToDecimals(direction === 'BUY' ? input.ask : input.bid, decimals);
   const refSl =
     direction === 'BUY' ? entryPrice - safeAtr * 0.95 : entryPrice + safeAtr * 0.95;
   const baseLot =
     lotMode === 'FIXED_LOT'
       ? configuredFixed
-      : calculateXauLotSize(Math.max(100, input.accountBalance), configuredRiskPct, entryPrice, refSl);
+      : calculatePairLotSize(
+          Math.max(100, input.accountBalance),
+          configuredRiskPct,
+          entryPrice,
+          refSl,
+          inferredSymbol
+        );
 
   const invalidatedMaxLot =
     invalidatedPositions.length > 0
@@ -1199,23 +1320,24 @@ export function computeMathematicalRecoveryPlan(
     Math.max(0.01, Math.min(20, maxAllowedMartilLot, rawMartilLot)).toFixed(2)
   );
 
-  // Exact USD move required for 100% loss recovery + positive net buffer
-  // On XAUUSD: 1.00 lot * $1.00 move = $100 PnL
+  // Exact price move required for 100% loss recovery + positive net buffer
   const beMoveUsd =
-    totalLossToRecoverUsd > 0 ? totalLossToRecoverUsd / (recoveryLots * 100) : 0;
-  const profitBufferUsd = Math.max(0.5, recoveryLots * 100 * 0.35);
+    totalLossToRecoverUsd > 0 ? totalLossToRecoverUsd / (recoveryLots * contractSize) : 0;
+  const profitBufferUsd = Math.max(0.5, safeAtr * recoveryLots * contractSize * 0.2);
   const rawNeededMove =
-    (totalLossToRecoverUsd + profitBufferUsd) / (recoveryLots * 100);
-  const minScalpMove = Math.max(0.45, safeAtr * 0.32);
-  const neededMoveUsd = Number(Math.max(minScalpMove, rawNeededMove).toFixed(2));
+    (totalLossToRecoverUsd + profitBufferUsd) / (recoveryLots * contractSize);
+  const minScalpMove = Math.max(meta.minSlDistance * 1.5, safeAtr * 0.32);
+  const neededMoveUsd = roundToDecimals(Math.max(minScalpMove, rawNeededMove), decimals);
 
-  const breakevenPrice = Number(
-    (direction === 'BUY' ? entryPrice + beMoveUsd : entryPrice - beMoveUsd).toFixed(2)
+  const breakevenPrice = roundToDecimals(
+    direction === 'BUY' ? entryPrice + beMoveUsd : entryPrice - beMoveUsd,
+    decimals
   );
-  const recoveryTp = Number(
-    (direction === 'BUY' ? entryPrice + neededMoveUsd : entryPrice - neededMoveUsd).toFixed(2)
+  const recoveryTp = roundToDecimals(
+    direction === 'BUY' ? entryPrice + neededMoveUsd : entryPrice - neededMoveUsd,
+    decimals
   );
-  const expectedGrossUsd = neededMoveUsd * recoveryLots * 100;
+  const expectedGrossUsd = neededMoveUsd * recoveryLots * contractSize;
   const expectedNetProfitUsd = Number((expectedGrossUsd - totalLossToRecoverUsd).toFixed(2));
 
   const srRoomUsd =
@@ -1228,7 +1350,8 @@ export function computeMathematicalRecoveryPlan(
       : Infinity;
 
   const achievableWithinAtr =
-    neededMoveUsd <= Math.max(safeAtr * 1.9, 3.2) && neededMoveUsd <= srRoomUsd * 1.08;
+    neededMoveUsd <= Math.max(safeAtr * 1.9, minScalpMove * 3.5) &&
+    neededMoveUsd <= srRoomUsd * 1.08;
 
   const triggeredBy: MathematicalRecoveryPlan['triggeredBy'] =
     invalidatedPositions.length > 0 && closedStreakCount > 0
@@ -1244,20 +1367,20 @@ export function computeMathematicalRecoveryPlan(
 
   const rationale =
     mode === 'EXECUTE_NOW'
-      ? `AI mengonfirmasi pembalikan ${direction}: buka Martil ${recoveryLots.toFixed(
+      ? `AI mengonfirmasi pembalikan ${direction} (${inferredSymbol}): buka Martil ${recoveryLots.toFixed(
           2
         )} lot (Base ${baseLot.toFixed(2)} / Prev ${lastLostLot.toFixed(2)} × ${
           martilOn ? `${mult.toFixed(1)}x` : '1.0x'
-        }) @ ${entryPrice.toFixed(2)} dengan TP Matematis ${recoveryTp.toFixed(
-          2
-        )} (+$${neededMoveUsd.toFixed(2)}/oz) untuk pulih 100% loss -$${totalLossToRecoverUsd.toFixed(
+        }) @ ${entryPrice.toFixed(decimals)} dengan TP Matematis ${recoveryTp.toFixed(
+          decimals
+        )} (+${neededMoveUsd.toFixed(decimals)}) untuk pulih 100% loss -$${totalLossToRecoverUsd.toFixed(
           2
         )} + net +$${expectedNetProfitUsd.toFixed(2)}.`
-      : `Recovery 100% SIAGA (loss -$${totalLossToRecoverUsd.toFixed(
+      : `Recovery 100% SIAGA ${inferredSymbol} (loss -$${totalLossToRecoverUsd.toFixed(
           2
         )}): siapkan Martil ${recoveryLots.toFixed(2)} lot arah ${direction} (BE ${breakevenPrice.toFixed(
-          2
-        )} · TP Pulih ${recoveryTp.toFixed(2)}) begitu sinyal konfirmasi keluar.`;
+          decimals
+        )} · TP Pulih ${recoveryTp.toFixed(decimals)}) begitu sinyal konfirmasi keluar.`;
 
   return {
     isActive: true,
